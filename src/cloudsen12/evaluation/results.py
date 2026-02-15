@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 from matplotlib.patches import Patch
 
 from cloudsen12.config.constants import CLASS_NAMES, METRIC_NAMES
@@ -107,6 +108,29 @@ class ResultsManager:
 
         if threshold_results is not None and experiment is not None:
             self.results[model_name].optimal_thresholds[experiment] = threshold_results
+
+    def save_param_count(
+        self,
+        model_name: str,
+        model: torch.nn.Module,
+    ) -> None:
+        """Count and store model parameters in additional_info.
+
+        Args:
+            model_name: Name of the model.
+            model: PyTorch model (or single model from an ensemble).
+        """
+        total = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        if model_name not in self.results:
+            raise ValueError(
+                f"No results for '{model_name}'. Run full_evaluation first."
+            )
+
+        self.results[model_name].additional_info["total_params"] = total
+        self.results[model_name].additional_info["trainable_params"] = trainable
+        print(f"{model_name}: {total / 1e6:.2f}M total, {trainable / 1e6:.2f}M trainable")
 
     def plot_metric_comparison(
         self,
@@ -291,6 +315,62 @@ class ResultsManager:
         ax.set_title(f"Omission & Commission Error — {class_name}", fontsize=13)
         ax.legend(fontsize=10)
         ax.grid(axis="y", alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.show()
+
+    def plot_model_parameter_counts(
+        self,
+        models: Optional[List[str]] = None,
+        figsize: Tuple[int, int] = (10, 6),
+        save_path: Optional[str] = None,
+    ) -> None:
+        """Plot total parameter count for each model as a horizontal bar chart.
+
+        Requires save_param_count() to have been called for each model.
+
+        Args:
+            models: Model names to include. If None, uses all with param data.
+            figsize: Figure size.
+            save_path: If provided, saves the figure.
+        """
+        if models is None:
+            models = [
+                m for m in self.results
+                if "total_params" in self.results[m].additional_info
+            ]
+
+        if not models:
+            print("No parameter counts saved. Call save_param_count() first.")
+            return
+
+        labels, totals, colors = [], [], []
+        for m in models:
+            info = self.results[m].additional_info
+            style = _get_style(m)
+            labels.append(style["label"])
+            totals.append(info["total_params"] / 1e6)
+            colors.append(style["color"])
+
+        y = np.arange(len(models))
+        fig, ax = plt.subplots(figsize=figsize)
+        bars = ax.barh(y, totals, color=colors, alpha=0.85, edgecolor="white")
+
+        for bar, val in zip(bars, totals):
+            ax.text(
+                bar.get_width() + max(totals) * 0.01,
+                bar.get_y() + bar.get_height() / 2,
+                f"{val:.2f}M", va="center", fontsize=10,
+            )
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontsize=10)
+        ax.set_xlabel("Parameters (millions)", fontsize=12)
+        ax.set_title("Model Parameter Counts", fontsize=13)
+        ax.grid(axis="x", alpha=0.3)
+        ax.invert_yaxis()
         plt.tight_layout()
 
         if save_path:

@@ -681,11 +681,22 @@ class ResultsManager:
     # Efficiency bubble chart
     # ------------------------------------------------------------------
 
+    def _compute_mean_iou(self, model_name: str) -> float:
+        """Compute mean IoU from the stored confusion matrix."""
+        cm = self.results[model_name].confusion_matrix
+        if cm.size == 0:
+            return 0.0
+        intersection = np.diag(cm)
+        union = cm.sum(axis=1) + cm.sum(axis=0) - intersection
+        with np.errstate(invalid="ignore", divide="ignore"):
+            iou = intersection / union
+        return float(np.nanmean(iou))
+
     def plot_efficiency_bubble(
         self,
         models: Optional[List[str]] = None,
         x_metric: str = "total_params",
-        y_metric: str = "overall_accuracy",
+        y_metric: str = "mean_iou",
         size_metric: Optional[str] = "avg_batch_time",
         figsize: Tuple[int, int] = (10, 7),
         save_path: Optional[str] = None,
@@ -695,7 +706,8 @@ class ResultsManager:
         Args:
             models: Model names. If None, uses all with param data.
             x_metric: 'total_params' (from additional_info).
-            y_metric: 'overall_accuracy' or a class F1, e.g. 'Cloud Shadow F1-Score'.
+            y_metric: 'mean_iou', 'overall_accuracy', or a class metric
+                e.g. 'Cloud Shadow F1-Score'.
             size_metric: 'avg_batch_time' for bubble size, or None for equal size.
             figsize: Figure size.
             save_path: If provided, saves the figure.
@@ -719,15 +731,16 @@ class ResultsManager:
 
             x_val = info.get("total_params", 0) / 1e6
 
-            if y_metric == "overall_accuracy":
+            if y_metric == "mean_iou":
+                y_val = self._compute_mean_iou(m)
+            elif y_metric == "overall_accuracy":
                 y_val = result.overall_accuracy
             elif " " in y_metric:
-                # e.g. "Cloud Shadow F1-Score"
                 parts = y_metric.rsplit(" ", 1)
                 cls_name, metric_name = parts[0], parts[1]
                 y_val = result.metrics.get(cls_name, {}).get(metric_name, 0)
             else:
-                y_val = result.overall_accuracy
+                y_val = self._compute_mean_iou(m)
 
             if size_metric and size_metric in info:
                 s_val = info[size_metric] * 1000  # ms
@@ -747,9 +760,10 @@ class ResultsManager:
                 fontsize=9, color=style["color"],
             )
 
+        y_label = "Mean IoU" if y_metric == "mean_iou" else y_metric.replace("_", " ").title()
         ax.set_xlabel("Parameters (M)", fontsize=12)
-        ax.set_ylabel(y_metric.replace("_", " ").title(), fontsize=12)
-        title = "Efficiency: Parameters vs Performance"
+        ax.set_ylabel(y_label, fontsize=12)
+        title = f"Efficiency: Parameters vs {y_label}"
         if size_metric:
             title += " (bubble = inference time)"
         ax.set_title(title, fontsize=13)

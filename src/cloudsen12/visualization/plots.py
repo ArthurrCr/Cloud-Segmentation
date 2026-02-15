@@ -112,7 +112,7 @@ def plot_training_history(
 
 # Model display names and colors for consistent styling across figures.
 MODEL_STYLES: Dict[str, Dict] = {
-    "Unet + regnetz d8": {"label": "Ours (UNet+RegNetZ-D8)", "color": "#2196F3", "marker": "o"},
+    "Unet + regnetz d8": {"label": "UNet+RegNetZ-D8", "color": "#2196F3", "marker": "o"},
     "CloudS2Mask ensemble": {"label": "CloudS2Mask (ensemble)", "color": "#FF9800", "marker": "s"},
     "CloudS2Mask Dice_1 (single)": {"label": "CloudS2Mask Dice₁", "color": "#FFC107", "marker": "^"},
     "CloudS2Mask Dice_2 (single)": {"label": "CloudS2Mask Dice₂", "color": "#FF5722", "marker": "v"},

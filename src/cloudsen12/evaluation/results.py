@@ -13,24 +13,12 @@ from matplotlib.patches import Patch
 from matplotlib.colors import ListedColormap
 
 from cloudsen12.config.constants import CLASS_NAMES, METRIC_NAMES
-from cloudsen12.visualization.plots import (
-    _get_style, _clean_spines, _make_fig_with_table, _add_table_below,
-)
+from cloudsen12.visualization.plots import _get_style, _clean_spines
 
 
 @dataclass
 class ModelResult:
-    """Stores evaluation results for a single model.
-
-    Attributes:
-        metrics: Per-class metrics dictionary.
-        confusion_matrix: Confusion matrix as numpy array.
-        overall_accuracy: Overall accuracy score.
-        timestamp: ISO format creation timestamp.
-        boa_baseline: BOA results per experiment.
-        optimal_thresholds: Threshold optimization results per experiment.
-        additional_info: Extra metadata (parameters, GFLOPs, etc.).
-    """
+    """Stores evaluation results for a single model."""
 
     metrics: Dict
     confusion_matrix: np.ndarray
@@ -42,11 +30,7 @@ class ModelResult:
 
 
 class ResultsManager:
-    """Manages model results and creates comparative visualizations.
-
-    Attributes:
-        results: Mapping of model names to ModelResult objects.
-    """
+    """Manages model results and creates comparative visualizations."""
 
     def __init__(self) -> None:
         self.results: Dict[str, ModelResult] = {}
@@ -118,23 +102,20 @@ class ResultsManager:
         model_name: str,
         model: torch.nn.Module,
     ) -> None:
-        """Count and store model parameters in additional_info.
-
-        Args:
-            model_name: Name of the model.
-            model: PyTorch model (or single model from an ensemble).
-        """
+        """Count and store model parameters in additional_info."""
         total = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
         if model_name not in self.results:
-            raise ValueError(
-                f"No results for '{model_name}'. Run full_evaluation first."
-            )
+            raise ValueError(f"No results for '{model_name}'. Run full_evaluation first.")
 
         self.results[model_name].additional_info["total_params"] = total
         self.results[model_name].additional_info["trainable_params"] = trainable
         print(f"{model_name}: {total / 1e6:.2f}M total, {trainable / 1e6:.2f}M trainable")
+
+    # ------------------------------------------------------------------
+    # Plot methods (all return pd.DataFrame with values)
+    # ------------------------------------------------------------------
 
     def plot_metric_comparison(
         self,
@@ -142,16 +123,11 @@ class ResultsManager:
         models: Optional[List[str]] = None,
         figsize: Tuple[int, int] = (20, 12),
         save_path: Optional[str] = None,
-    ) -> None:
+    ) -> pd.DataFrame:
         """Plot a metric by class comparing multiple models.
 
-        Highlights the best model per class with a dashed border.
-
-        Args:
-            metric: Metric name to plot.
-            models: Model names to include. If None, uses all.
-            figsize: Figure size.
-            save_path: If provided, saves the figure.
+        Returns:
+            DataFrame with models as rows and classes as columns.
         """
         if models is None:
             models = sorted(self.results.keys())
@@ -181,7 +157,7 @@ class ResultsManager:
         width = 0.8 / n_models
         x = np.arange(len(CLASS_NAMES))
 
-        fig, ax, ax_tab = _make_fig_with_table(figsize)
+        fig, ax = plt.subplots(figsize=figsize)
 
         for i, model in enumerate(models):
             vals = values_mat[i]
@@ -216,26 +192,25 @@ class ResultsManager:
         ax.set_xticks(x)
         ax.set_xticklabels(CLASS_NAMES, fontsize=10)
         ax.legend(
-            handles=legend_patches,
-            title="Models",
-            bbox_to_anchor=(1.02, 1),
-            loc="upper left",
+            handles=legend_patches, title="Models",
+            bbox_to_anchor=(1.02, 1), loc="upper left",
         )
         ax.grid(axis="y", alpha=0.3)
         _clean_spines(ax)
-
-        # Table.
-        col_labels = CLASS_NAMES
-        row_labels = [_get_style(m)["label"] for m in models]
-        cell_text = [[f"{values_mat[i, j]:.3f}" for j in range(len(CLASS_NAMES))] for i in range(n_models)]
-        row_colors = [_get_style(m)["color"] for m in models]
-        _add_table_below(fig, ax_tab, col_labels, row_labels, cell_text, row_colors)
-
         plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.show()
+
+        # Build DataFrame.
+        rows = []
+        for i, m in enumerate(models):
+            row = {"Model": _get_style(m)["label"]}
+            for j, c in enumerate(CLASS_NAMES):
+                row[c] = round(values_mat[i, j], 4)
+            rows.append(row)
+        return pd.DataFrame(rows)
 
     def plot_threshold_curve(
         self,
@@ -252,8 +227,7 @@ class ResultsManager:
         data = self.results[model_name].optimal_thresholds[experiment]
         style = _get_style(model_name)
 
-        plt.figure(figsize=figsize)
-        ax = plt.gca()
+        fig, ax = plt.subplots(figsize=figsize)
         ax.plot(data["thresholds"], data["median_boas"], linewidth=2, color=style["color"])
         ax.scatter(
             data["best_threshold"],
@@ -282,14 +256,11 @@ class ResultsManager:
         models: Optional[List[str]] = None,
         figsize: Tuple[int, int] = (10, 6),
         save_path: Optional[str] = None,
-    ) -> None:
-        """Plot Omission and Commission Error for a single class across models.
+    ) -> pd.DataFrame:
+        """Plot Omission and Commission Error for a single class.
 
-        Args:
-            class_name: Class to analyze (e.g. 'Thick Cloud').
-            models: Model names to include. If None, uses all.
-            figsize: Figure size.
-            save_path: If provided, saves the figure.
+        Returns:
+            DataFrame with OE and CE per model.
         """
         if models is None:
             models = sorted(self.results.keys())
@@ -306,7 +277,7 @@ class ResultsManager:
         x = np.arange(len(models))
         width = 0.35
 
-        fig, ax, ax_tab = _make_fig_with_table(figsize)
+        fig, ax = plt.subplots(figsize=figsize)
         bars_oe = ax.bar(
             x - width / 2, oe_vals, width, label="Omission Error",
             color=colors, alpha=0.85, edgecolor="white",
@@ -331,32 +302,28 @@ class ResultsManager:
         ax.legend(fontsize=10)
         ax.grid(axis="y", alpha=0.3)
         _clean_spines(ax)
-
-        # Table.
-        col_labels = ["Omission Error", "Commission Error"]
-        cell_text = [[f"{oe:.3f}", f"{ce:.3f}"] for oe, ce in zip(oe_vals, ce_vals)]
-        _add_table_below(fig, ax_tab, col_labels, labels, cell_text, colors)
-
         plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.show()
 
+        return pd.DataFrame({
+            "Model": labels,
+            "Omission Error": [round(v, 4) for v in oe_vals],
+            "Commission Error": [round(v, 4) for v in ce_vals],
+        })
+
     def plot_model_parameter_counts(
         self,
         models: Optional[List[str]] = None,
         figsize: Tuple[int, int] = (10, 6),
         save_path: Optional[str] = None,
-    ) -> None:
-        """Plot total parameter count for each model as a horizontal bar chart.
+    ) -> pd.DataFrame:
+        """Plot total parameter count as horizontal bar chart.
 
-        Requires save_param_count() to have been called for each model.
-
-        Args:
-            models: Model names to include. If None, uses all with param data.
-            figsize: Figure size.
-            save_path: If provided, saves the figure.
+        Returns:
+            DataFrame with total and trainable params per model.
         """
         if models is None:
             models = [
@@ -366,18 +333,19 @@ class ResultsManager:
 
         if not models:
             print("No parameter counts saved. Call save_param_count() first.")
-            return
+            return pd.DataFrame()
 
-        labels, totals, colors = [], [], []
+        labels, totals, trainable, colors = [], [], [], []
         for m in models:
             info = self.results[m].additional_info
             style = _get_style(m)
             labels.append(style["label"])
             totals.append(info["total_params"] / 1e6)
+            trainable.append(info.get("trainable_params", 0) / 1e6)
             colors.append(style["color"])
 
         y = np.arange(len(models))
-        fig, ax, ax_tab = _make_fig_with_table(figsize)
+        fig, ax = plt.subplots(figsize=figsize)
         bars = ax.barh(y, totals, color=colors, alpha=0.85, edgecolor="white")
 
         for bar, val in zip(bars, totals):
@@ -394,26 +362,21 @@ class ResultsManager:
         ax.grid(axis="x", alpha=0.3)
         ax.invert_yaxis()
         _clean_spines(ax)
-        # Keep bottom spine for horizontal bar chart.
         ax.spines["bottom"].set_visible(True)
-
-        # Table.
-        trainable = [
-            f"{self.results[m].additional_info.get('trainable_params', 0) / 1e6:.2f}M"
-            for m in models
-        ]
-        col_labels = ["Total Params", "Trainable Params"]
-        cell_text = [[f"{t:.2f}M", tr] for t, tr in zip(totals, trainable)]
-        _add_table_below(fig, ax_tab, col_labels, labels, cell_text, colors)
-
         plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.show()
 
+        return pd.DataFrame({
+            "Model": labels,
+            "Total Params (M)": [round(t, 2) for t in totals],
+            "Trainable Params (M)": [round(t, 2) for t in trainable],
+        })
+
     def get_summary_dataframe(
-        self, models: Optional[List[str]] = None
+        self, models: Optional[List[str]] = None,
     ) -> pd.DataFrame:
         """Generate summary DataFrame with key metrics for all models."""
         if models is None:
@@ -439,7 +402,7 @@ class ResultsManager:
     # ------------------------------------------------------------------
 
     _CLASS_CMAP = ListedColormap(["#2ecc71", "#e74c3c", "#f39c12", "#3498db"])
-    _CLASS_LABELS = CLASS_NAMES  # Clear, Thick Cloud, Thin Cloud, Cloud Shadow
+    _CLASS_LABELS = CLASS_NAMES
 
     def plot_qualitative_examples(
         self,
@@ -450,21 +413,7 @@ class ResultsManager:
         figsize_per_col: float = 3.0,
         save_path: Optional[str] = None,
     ) -> None:
-        """Show RGB, GT, and predictions side by side for sample patches.
-
-        Args:
-            models_dict: Mapping of model_name to (models_list, use_ensemble,
-                normalize_imgs). E.g.:
-                {
-                    "Unet + regnetz d8": ([model], False, False),
-                    "CloudS2Mask ensemble": (models_ensemble, True, True),
-                }
-            test_loader: DataLoader with test data.
-            n_samples: Number of patches to show.
-            indices: Specific patch indices. If None, picks evenly spaced.
-            figsize_per_col: Width per column in inches.
-            save_path: If provided, saves the figure.
-        """
+        """Show RGB, GT, and predictions side by side for sample patches."""
         from cloudsen12.inference.prediction import get_predictions
         from cloudsen12.inference.normalization import (
             get_normalization_stats, normalize_images,
@@ -479,7 +428,6 @@ class ResultsManager:
             "cpu",
         )
 
-        # Collect all patches.
         all_imgs, all_gts = [], []
         for imgs, gts in test_loader:
             for i in range(imgs.size(0)):
@@ -491,7 +439,7 @@ class ResultsManager:
             indices = np.linspace(0, n_total - 1, n_samples, dtype=int).tolist()
 
         model_names = list(models_dict.keys())
-        n_cols = 2 + len(model_names)  # RGB + GT + each model
+        n_cols = 2 + len(model_names)
         n_rows = len(indices)
         fig, axes = plt.subplots(
             n_rows, n_cols,
@@ -506,7 +454,6 @@ class ResultsManager:
             img_t = all_imgs[idx]
             gt = all_gts[idx].numpy()
 
-            # RGB composite (bands B04=3, B03=2, B02=1).
             rgb = img_t[[3, 2, 1]].numpy().transpose(1, 2, 0)
             rgb = np.clip(rgb / np.percentile(rgb, 98), 0, 1)
 
@@ -541,7 +488,6 @@ class ResultsManager:
                 axes[row, col + 2].set_xticks([])
                 axes[row, col + 2].set_yticks([])
 
-        # Legend.
         legend_patches = [
             Patch(color=self._CLASS_CMAP(i), label=c)
             for i, c in enumerate(self._CLASS_LABELS)
@@ -557,7 +503,7 @@ class ResultsManager:
         plt.show()
 
     # ------------------------------------------------------------------
-    # Inference cost
+    # Inference benchmarking
     # ------------------------------------------------------------------
 
     def benchmark_inference(
@@ -569,19 +515,7 @@ class ResultsManager:
         normalize_imgs: bool = False,
         n_batches: int = 20,
     ) -> float:
-        """Benchmark inference time and store in additional_info.
-
-        Args:
-            model_name: Name of the model.
-            models: Model or list of models.
-            test_loader: DataLoader for timing.
-            use_ensemble: Whether to use ensemble prediction.
-            normalize_imgs: Whether to normalize images.
-            n_batches: Number of batches to time.
-
-        Returns:
-            Average time per batch in seconds.
-        """
+        """Benchmark inference time and store in additional_info."""
         from cloudsen12.inference.prediction import get_predictions
         from cloudsen12.inference.normalization import (
             get_normalization_stats, normalize_images,
@@ -609,7 +543,7 @@ class ResultsManager:
 
         times = []
         batch_iter = iter(test_loader)
-        for i in range(n_batches):
+        for _ in range(n_batches):
             try:
                 imgs, _ = next(batch_iter)
             except StopIteration:
@@ -644,7 +578,7 @@ class ResultsManager:
 
         avg_per_img = avg / test_loader.batch_size
         print(
-            f"{model_name}: {avg:.4f}s/batch ± {std_t:.4f}s "
+            f"{model_name}: {avg:.4f}s/batch \u00b1 {std_t:.4f}s "
             f"({avg_per_img * 1000:.1f} ms/image)"
         )
         return avg
@@ -654,15 +588,11 @@ class ResultsManager:
         models: Optional[List[str]] = None,
         figsize: Tuple[int, int] = (10, 6),
         save_path: Optional[str] = None,
-    ) -> None:
-        """Plot inference time per image for each model.
+    ) -> pd.DataFrame:
+        """Plot inference time per image.
 
-        Requires benchmark_inference() to have been called first.
-
-        Args:
-            models: Model names. If None, uses all with timing data.
-            figsize: Figure size.
-            save_path: If provided, saves the figure.
+        Returns:
+            DataFrame with ms/image and std per model.
         """
         if models is None:
             models = [
@@ -672,7 +602,7 @@ class ResultsManager:
 
         if not models:
             print("No inference timing data. Call benchmark_inference() first.")
-            return
+            return pd.DataFrame()
 
         labels, times_ms, stds_ms, colors = [], [], [], []
         for m in models:
@@ -685,7 +615,7 @@ class ResultsManager:
             colors.append(style["color"])
 
         y = np.arange(len(models))
-        fig, ax, ax_tab = _make_fig_with_table(figsize)
+        fig, ax = plt.subplots(figsize=figsize)
         bars = ax.barh(
             y, times_ms, xerr=stds_ms, color=colors,
             alpha=0.85, edgecolor="white", capsize=3,
@@ -706,17 +636,17 @@ class ResultsManager:
         ax.invert_yaxis()
         _clean_spines(ax)
         ax.spines["bottom"].set_visible(True)
-
-        # Table.
-        col_labels = ["ms/image", "\u00b1 std"]
-        cell_text = [[f"{t:.1f}", f"{s:.1f}"] for t, s in zip(times_ms, stds_ms)]
-        _add_table_below(fig, ax_tab, col_labels, labels, cell_text, colors)
-
         plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.show()
+
+        return pd.DataFrame({
+            "Model": labels,
+            "ms/image": [round(t, 1) for t in times_ms],
+            "\u00b1 std (ms)": [round(s, 1) for s in stds_ms],
+        })
 
     # ------------------------------------------------------------------
     # Efficiency bubble chart
@@ -741,17 +671,11 @@ class ResultsManager:
         size_metric: Optional[str] = "avg_batch_time",
         figsize: Tuple[int, int] = (10, 7),
         save_path: Optional[str] = None,
-    ) -> None:
+    ) -> pd.DataFrame:
         """Bubble chart: parameters vs performance, sized by inference cost.
 
-        Args:
-            models: Model names. If None, uses all with param data.
-            x_metric: 'total_params' (from additional_info).
-            y_metric: 'mean_iou', 'overall_accuracy', or a class metric
-                e.g. 'Cloud Shadow F1-Score'.
-            size_metric: 'avg_batch_time' for bubble size, or None for equal size.
-            figsize: Figure size.
-            save_path: If provided, saves the figure.
+        Returns:
+            DataFrame with params, metric value, and inference time per model.
         """
         if models is None:
             models = [
@@ -761,13 +685,11 @@ class ResultsManager:
 
         if not models:
             print("No parameter data. Call save_param_count() first.")
-            return
+            return pd.DataFrame()
 
-        fig, ax, ax_tab = _make_fig_with_table(figsize)
+        fig, ax = plt.subplots(figsize=figsize)
 
-        table_rows: List[List[str]] = []
-        table_labels: List[str] = []
-        table_colors: List[str] = []
+        table_rows: List[Dict] = []
 
         for m in models:
             info = self.results[m].additional_info
@@ -788,7 +710,7 @@ class ResultsManager:
                 y_val = self._compute_mean_iou(m)
 
             if size_metric and size_metric in info:
-                s_val = info[size_metric] * 1000  # ms
+                s_val = info[size_metric] * 1000
                 bubble_size = max(s_val * 10, 80)
             else:
                 s_val = None
@@ -805,12 +727,10 @@ class ResultsManager:
                 fontsize=9, color=style["color"],
             )
 
-            row = [f"{x_val:.2f}M", f"{y_val:.4f}"]
+            row = {"Model": style["label"], "Params (M)": round(x_val, 2), y_metric: round(y_val, 4)}
             if s_val is not None:
-                row.append(f"{s_val:.1f} ms")
+                row["Inference (ms)"] = round(s_val, 1)
             table_rows.append(row)
-            table_labels.append(style["label"])
-            table_colors.append(style["color"])
 
         y_label = "Mean IoU" if y_metric == "mean_iou" else y_metric.replace("_", " ").title()
         ax.set_xlabel("Parameters (M)", fontsize=12)
@@ -821,15 +741,10 @@ class ResultsManager:
         ax.set_title(title, fontsize=13)
         ax.grid(alpha=0.3)
         _clean_spines(ax)
-
-        # Table.
-        col_labels = ["Params", y_label]
-        if size_metric:
-            col_labels.append("Inference")
-        _add_table_below(fig, ax_tab, col_labels, table_labels, table_rows, table_colors)
-
         plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches="tight")
         plt.show()
+
+        return pd.DataFrame(table_rows)

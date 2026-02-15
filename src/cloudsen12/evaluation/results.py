@@ -2,13 +2,15 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 from matplotlib.patches import Patch
+from matplotlib.colors import ListedColormap
 
 from cloudsen12.config.constants import CLASS_NAMES, METRIC_NAMES
 from cloudsen12.visualization.plots import _get_style
@@ -398,3 +400,362 @@ class ResultsManager:
             rows.append(row)
 
         return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------
+    # Qualitative examples
+    # ------------------------------------------------------------------
+
+    _CLASS_CMAP = ListedColormap(["#2ecc71", "#e74c3c", "#f39c12", "#3498db"])
+    _CLASS_LABELS = CLASS_NAMES  # Clear, Thick Cloud, Thin Cloud, Cloud Shadow
+
+    def plot_qualitative_examples(
+        self,
+        models_dict: Dict[str, Tuple],
+        test_loader: torch.utils.data.DataLoader,
+        n_samples: int = 4,
+        indices: Optional[List[int]] = None,
+        figsize_per_col: float = 3.0,
+        save_path: Optional[str] = None,
+    ) -> None:
+        """Show RGB, GT, and predictions side by side for sample patches.
+
+        Args:
+            models_dict: Mapping of model_name to (models_list, use_ensemble,
+                normalize_imgs). E.g.:
+                {
+                    "Unet + regnetz d8": ([model], False, False),
+                    "CloudS2Mask ensemble": (models_ensemble, True, True),
+                }
+            test_loader: DataLoader with test data.
+            n_samples: Number of patches to show.
+            indices: Specific patch indices. If None, picks evenly spaced.
+            figsize_per_col: Width per column in inches.
+            save_path: If provided, saves the figure.
+        """
+        from cloudsen12.inference.prediction import get_predictions
+        from cloudsen12.inference.normalization import (
+            get_normalization_stats, normalize_images,
+        )
+        from cloudsen12.config.constants import SENTINEL_BANDS
+
+        device = next(
+            (
+                str(next(ms[0][0].parameters()).device)
+                for ms in models_dict.values()
+            ),
+            "cpu",
+        )
+
+        # Collect all patches.
+        all_imgs, all_gts = [], []
+        for imgs, gts in test_loader:
+            for i in range(imgs.size(0)):
+                all_imgs.append(imgs[i])
+                all_gts.append(gts[i])
+
+        n_total = len(all_imgs)
+        if indices is None:
+            indices = np.linspace(0, n_total - 1, n_samples, dtype=int).tolist()
+
+        model_names = list(models_dict.keys())
+        n_cols = 2 + len(model_names)  # RGB + GT + each model
+        n_rows = len(indices)
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(figsize_per_col * n_cols, figsize_per_col * n_rows),
+        )
+        if n_rows == 1:
+            axes = axes[np.newaxis, :]
+
+        mean, std = get_normalization_stats(device, False, SENTINEL_BANDS)
+
+        for row, idx in enumerate(indices):
+            img_t = all_imgs[idx]
+            gt = all_gts[idx].numpy()
+
+            # RGB composite (bands B04=3, B03=2, B02=1).
+            rgb = img_t[[3, 2, 1]].numpy().transpose(1, 2, 0)
+            rgb = np.clip(rgb / np.percentile(rgb, 98), 0, 1)
+
+            axes[row, 0].imshow(rgb)
+            axes[row, 0].set_title("RGB" if row == 0 else "", fontsize=10)
+            axes[row, 0].set_ylabel(f"Patch {idx}", fontsize=9)
+            axes[row, 0].set_xticks([])
+            axes[row, 0].set_yticks([])
+
+            axes[row, 1].imshow(gt, cmap=self._CLASS_CMAP, vmin=0, vmax=3)
+            axes[row, 1].set_title("Ground Truth" if row == 0 else "", fontsize=10)
+            axes[row, 1].set_xticks([])
+            axes[row, 1].set_yticks([])
+
+            for col, m_name in enumerate(model_names):
+                models_list, use_ens, norm = models_dict[m_name]
+                inp = img_t.unsqueeze(0).to(device).float()
+                if norm:
+                    inp = normalize_images(inp, mean, std)
+                with torch.no_grad():
+                    pred = get_predictions(
+                        models_list, inp, use_ensemble=use_ens,
+                    )[0].cpu().numpy()
+
+                style = _get_style(m_name)
+                axes[row, col + 2].imshow(
+                    pred, cmap=self._CLASS_CMAP, vmin=0, vmax=3,
+                )
+                axes[row, col + 2].set_title(
+                    style["label"] if row == 0 else "", fontsize=10,
+                )
+                axes[row, col + 2].set_xticks([])
+                axes[row, col + 2].set_yticks([])
+
+        # Legend.
+        legend_patches = [
+            Patch(color=self._CLASS_CMAP(i), label=c)
+            for i, c in enumerate(self._CLASS_LABELS)
+        ]
+        fig.legend(
+            handles=legend_patches, loc="lower center",
+            ncol=4, fontsize=9, frameon=True,
+        )
+        plt.tight_layout(rect=[0, 0.04, 1, 1])
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.show()
+
+    # ------------------------------------------------------------------
+    # Inference cost
+    # ------------------------------------------------------------------
+
+    def benchmark_inference(
+        self,
+        model_name: str,
+        models: Union[torch.nn.Module, List[torch.nn.Module]],
+        test_loader: torch.utils.data.DataLoader,
+        use_ensemble: bool = False,
+        normalize_imgs: bool = False,
+        n_batches: int = 20,
+    ) -> float:
+        """Benchmark inference time and store in additional_info.
+
+        Args:
+            model_name: Name of the model.
+            models: Model or list of models.
+            test_loader: DataLoader for timing.
+            use_ensemble: Whether to use ensemble prediction.
+            normalize_imgs: Whether to normalize images.
+            n_batches: Number of batches to time.
+
+        Returns:
+            Average time per batch in seconds.
+        """
+        from cloudsen12.inference.prediction import get_predictions
+        from cloudsen12.inference.normalization import (
+            get_normalization_stats, normalize_images,
+        )
+        from cloudsen12.config.constants import SENTINEL_BANDS
+
+        if not isinstance(models, list):
+            models = [models]
+
+        device = str(next(models[0].parameters()).device)
+        mean, std = get_normalization_stats(device, False, SENTINEL_BANDS)
+
+        for m in models:
+            m.eval()
+
+        # Warmup.
+        imgs, _ = next(iter(test_loader))
+        imgs = imgs.to(device).float()
+        if normalize_imgs:
+            imgs = normalize_images(imgs, mean, std)
+        with torch.no_grad():
+            get_predictions(models, imgs, use_ensemble=use_ensemble)
+        if "cuda" in device:
+            torch.cuda.synchronize()
+
+        times = []
+        batch_iter = iter(test_loader)
+        for i in range(n_batches):
+            try:
+                imgs, _ = next(batch_iter)
+            except StopIteration:
+                batch_iter = iter(test_loader)
+                imgs, _ = next(batch_iter)
+
+            imgs = imgs.to(device).float()
+            if normalize_imgs:
+                imgs = normalize_images(imgs, mean, std)
+
+            if "cuda" in device:
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+
+            with torch.no_grad():
+                get_predictions(models, imgs, use_ensemble=use_ensemble)
+
+            if "cuda" in device:
+                torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            times.append(t1 - t0)
+
+        avg = np.mean(times)
+        std_t = np.std(times)
+
+        if model_name not in self.results:
+            raise ValueError(f"No results for '{model_name}'.")
+
+        self.results[model_name].additional_info["avg_batch_time"] = avg
+        self.results[model_name].additional_info["std_batch_time"] = std_t
+        self.results[model_name].additional_info["batch_size"] = test_loader.batch_size
+
+        avg_per_img = avg / test_loader.batch_size
+        print(
+            f"{model_name}: {avg:.4f}s/batch ± {std_t:.4f}s "
+            f"({avg_per_img * 1000:.1f} ms/image)"
+        )
+        return avg
+
+    def plot_inference_cost(
+        self,
+        models: Optional[List[str]] = None,
+        figsize: Tuple[int, int] = (10, 6),
+        save_path: Optional[str] = None,
+    ) -> None:
+        """Plot inference time per image for each model.
+
+        Requires benchmark_inference() to have been called first.
+
+        Args:
+            models: Model names. If None, uses all with timing data.
+            figsize: Figure size.
+            save_path: If provided, saves the figure.
+        """
+        if models is None:
+            models = [
+                m for m in self.results
+                if "avg_batch_time" in self.results[m].additional_info
+            ]
+
+        if not models:
+            print("No inference timing data. Call benchmark_inference() first.")
+            return
+
+        labels, times_ms, stds_ms, colors = [], [], [], []
+        for m in models:
+            info = self.results[m].additional_info
+            bs = info.get("batch_size", 1)
+            style = _get_style(m)
+            labels.append(style["label"])
+            times_ms.append(info["avg_batch_time"] / bs * 1000)
+            stds_ms.append(info["std_batch_time"] / bs * 1000)
+            colors.append(style["color"])
+
+        y = np.arange(len(models))
+        fig, ax = plt.subplots(figsize=figsize)
+        bars = ax.barh(
+            y, times_ms, xerr=stds_ms, color=colors,
+            alpha=0.85, edgecolor="white", capsize=3,
+        )
+
+        for bar, val in zip(bars, times_ms):
+            ax.text(
+                bar.get_width() + max(times_ms) * 0.02,
+                bar.get_y() + bar.get_height() / 2,
+                f"{val:.1f} ms", va="center", fontsize=10,
+            )
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontsize=10)
+        ax.set_xlabel("Inference Time per Image (ms)", fontsize=12)
+        ax.set_title("Inference Cost Comparison", fontsize=13)
+        ax.grid(axis="x", alpha=0.3)
+        ax.invert_yaxis()
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.show()
+
+    # ------------------------------------------------------------------
+    # Efficiency bubble chart
+    # ------------------------------------------------------------------
+
+    def plot_efficiency_bubble(
+        self,
+        models: Optional[List[str]] = None,
+        x_metric: str = "total_params",
+        y_metric: str = "overall_accuracy",
+        size_metric: Optional[str] = "avg_batch_time",
+        figsize: Tuple[int, int] = (10, 7),
+        save_path: Optional[str] = None,
+    ) -> None:
+        """Bubble chart: parameters vs performance, sized by inference cost.
+
+        Args:
+            models: Model names. If None, uses all with param data.
+            x_metric: 'total_params' (from additional_info).
+            y_metric: 'overall_accuracy' or a class F1, e.g. 'Cloud Shadow F1-Score'.
+            size_metric: 'avg_batch_time' for bubble size, or None for equal size.
+            figsize: Figure size.
+            save_path: If provided, saves the figure.
+        """
+        if models is None:
+            models = [
+                m for m in self.results
+                if "total_params" in self.results[m].additional_info
+            ]
+
+        if not models:
+            print("No parameter data. Call save_param_count() first.")
+            return
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        for m in models:
+            info = self.results[m].additional_info
+            result = self.results[m]
+            style = _get_style(m)
+
+            x_val = info.get("total_params", 0) / 1e6
+
+            if y_metric == "overall_accuracy":
+                y_val = result.overall_accuracy
+            elif " " in y_metric:
+                # e.g. "Cloud Shadow F1-Score"
+                parts = y_metric.rsplit(" ", 1)
+                cls_name, metric_name = parts[0], parts[1]
+                y_val = result.metrics.get(cls_name, {}).get(metric_name, 0)
+            else:
+                y_val = result.overall_accuracy
+
+            if size_metric and size_metric in info:
+                s_val = info[size_metric] * 1000  # ms
+                bubble_size = max(s_val * 10, 80)
+            else:
+                s_val = None
+                bubble_size = 200
+
+            ax.scatter(
+                x_val, y_val, s=bubble_size,
+                color=style["color"], alpha=0.75,
+                edgecolors="white", linewidth=1.5, zorder=5,
+            )
+            ax.annotate(
+                style["label"], (x_val, y_val),
+                textcoords="offset points", xytext=(8, 8),
+                fontsize=9, color=style["color"],
+            )
+
+        ax.set_xlabel("Parameters (M)", fontsize=12)
+        ax.set_ylabel(y_metric.replace("_", " ").title(), fontsize=12)
+        title = "Efficiency: Parameters vs Performance"
+        if size_metric:
+            title += " (bubble = inference time)"
+        ax.set_title(title, fontsize=13)
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.show()

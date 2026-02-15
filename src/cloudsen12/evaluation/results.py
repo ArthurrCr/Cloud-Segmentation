@@ -10,6 +10,7 @@ import pandas as pd
 from matplotlib.patches import Patch
 
 from cloudsen12.config.constants import CLASS_NAMES, METRIC_NAMES
+from cloudsen12.visualization.plots import _get_style
 
 
 @dataclass
@@ -44,14 +45,6 @@ class ResultsManager:
 
     def __init__(self) -> None:
         self.results: Dict[str, ModelResult] = {}
-        self._color_map: Dict[str, tuple] = {}
-        self._palette = plt.cm.Set3(np.linspace(0, 1, 12))
-
-    def _get_color(self, model_name: str) -> tuple:
-        if model_name not in self._color_map:
-            idx = len(self._color_map) % len(self._palette)
-            self._color_map[model_name] = self._palette[idx]
-        return self._color_map[model_name]
 
     def save_model_results(
         self,
@@ -165,8 +158,11 @@ class ResultsManager:
         for i, model in enumerate(models):
             vals = values_mat[i]
             offset = (i - n_models / 2 + 0.5) * width
-            color = self._get_color(model)
-            bars = ax.bar(x + offset, vals, width, alpha=0.85, color=color)
+            style = _get_style(model)
+            bars = ax.bar(
+                x + offset, vals, width, alpha=0.85,
+                color=style["color"], label=style["label"],
+            )
 
             for j, bar in enumerate(bars):
                 h = bar.get_height()
@@ -182,7 +178,8 @@ class ResultsManager:
                     bar.set_linestyle("--")
 
         legend_patches = [
-            Patch(color=self._get_color(m), label=m, alpha=0.85) for m in models
+            Patch(color=_get_style(m)["color"], label=_get_style(m)["label"], alpha=0.85)
+            for m in models
         ]
 
         ax.set_xlabel("Classes", fontsize=12)
@@ -216,23 +213,84 @@ class ResultsManager:
             return
 
         data = self.results[model_name].optimal_thresholds[experiment]
+        style = _get_style(model_name)
 
         plt.figure(figsize=figsize)
-        plt.plot(data["thresholds"], data["median_boas"], linewidth=2)
+        plt.plot(data["thresholds"], data["median_boas"], linewidth=2, color=style["color"])
         plt.scatter(
             data["best_threshold"],
             data["best_median_boa"],
-            s=100, zorder=5,
+            s=100, zorder=5, color=style["color"],
             label=f"t* = {data['best_threshold']:.2f}",
         )
         plt.xlabel("Threshold", fontsize=12)
         plt.ylabel("Median BOA", fontsize=12)
         plt.title(
-            f"Threshold Optimization - {experiment} - {model_name}",
+            f"Threshold Optimization - {experiment} - {style['label']}",
             fontsize=14,
         )
         plt.grid(alpha=0.3)
         plt.legend(fontsize=12)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.show()
+
+    def plot_errors_for_class(
+        self,
+        class_name: str,
+        models: Optional[List[str]] = None,
+        figsize: Tuple[int, int] = (10, 6),
+        save_path: Optional[str] = None,
+    ) -> None:
+        """Plot Omission and Commission Error for a single class across models.
+
+        Args:
+            class_name: Class to analyze (e.g. 'Thick Cloud').
+            models: Model names to include. If None, uses all.
+            figsize: Figure size.
+            save_path: If provided, saves the figure.
+        """
+        if models is None:
+            models = sorted(self.results.keys())
+
+        oe_vals, ce_vals, labels, colors = [], [], [], []
+        for m in models:
+            metrics = self.results[m].metrics.get(class_name, {})
+            oe_vals.append(metrics.get("Omission Error", 0.0))
+            ce_vals.append(metrics.get("Commission Error", 0.0))
+            style = _get_style(m)
+            labels.append(style["label"])
+            colors.append(style["color"])
+
+        x = np.arange(len(models))
+        width = 0.35
+
+        fig, ax = plt.subplots(figsize=figsize)
+        bars_oe = ax.bar(
+            x - width / 2, oe_vals, width, label="Omission Error",
+            color=colors, alpha=0.85, edgecolor="white",
+        )
+        bars_ce = ax.bar(
+            x + width / 2, ce_vals, width, label="Commission Error",
+            color=colors, alpha=0.55, edgecolor="white", hatch="//",
+        )
+
+        for bars in (bars_oe, bars_ce):
+            for bar in bars:
+                h = bar.get_height()
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, h + 0.003,
+                    f"{h:.3f}", ha="center", va="bottom", fontsize=9,
+                )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=10, rotation=15, ha="right")
+        ax.set_ylabel("Error Rate", fontsize=12)
+        ax.set_title(f"Omission & Commission Error — {class_name}", fontsize=13)
+        ax.legend(fontsize=10)
+        ax.grid(axis="y", alpha=0.3)
         plt.tight_layout()
 
         if save_path:

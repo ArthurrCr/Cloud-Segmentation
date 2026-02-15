@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 from scipy.stats import wilcoxon
 
-from cloudsen12.config.constants import CLASS_NAMES
+from cloudsen12.config.constants import CLASS_NAMES, NUM_CLASSES
 from cloudsen12.evaluation.boa import compute_patch_gt_stats, evaluate_test_dataset
 from cloudsen12.evaluation.metrics import compute_metrics, evaluate_model
 from cloudsen12.evaluation.results import ResultsManager

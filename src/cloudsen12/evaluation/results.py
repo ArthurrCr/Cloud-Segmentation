@@ -13,7 +13,9 @@ from matplotlib.patches import Patch
 from matplotlib.colors import ListedColormap
 
 from cloudsen12.config.constants import CLASS_NAMES, METRIC_NAMES
-from cloudsen12.visualization.plots import _get_style
+from cloudsen12.visualization.plots import (
+    _get_style, _clean_spines, _make_fig_with_table, _add_table_below,
+)
 
 
 @dataclass
@@ -179,7 +181,7 @@ class ResultsManager:
         width = 0.8 / n_models
         x = np.arange(len(CLASS_NAMES))
 
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax, ax_tab = _make_fig_with_table(figsize)
 
         for i, model in enumerate(models):
             vals = values_mat[i]
@@ -219,7 +221,16 @@ class ResultsManager:
             bbox_to_anchor=(1.02, 1),
             loc="upper left",
         )
-        ax.grid(alpha=0.3)
+        ax.grid(axis="y", alpha=0.3)
+        _clean_spines(ax)
+
+        # Table.
+        col_labels = CLASS_NAMES
+        row_labels = [_get_style(m)["label"] for m in models]
+        cell_text = [[f"{values_mat[i, j]:.3f}" for j in range(len(CLASS_NAMES))] for i in range(n_models)]
+        row_colors = [_get_style(m)["color"] for m in models]
+        _add_table_below(fig, ax_tab, col_labels, row_labels, cell_text, row_colors)
+
         plt.tight_layout()
 
         if save_path:
@@ -242,21 +253,23 @@ class ResultsManager:
         style = _get_style(model_name)
 
         plt.figure(figsize=figsize)
-        plt.plot(data["thresholds"], data["median_boas"], linewidth=2, color=style["color"])
-        plt.scatter(
+        ax = plt.gca()
+        ax.plot(data["thresholds"], data["median_boas"], linewidth=2, color=style["color"])
+        ax.scatter(
             data["best_threshold"],
             data["best_median_boa"],
             s=100, zorder=5, color=style["color"],
             label=f"t* = {data['best_threshold']:.2f}",
         )
-        plt.xlabel("Threshold", fontsize=12)
-        plt.ylabel("Median BOA", fontsize=12)
-        plt.title(
+        ax.set_xlabel("Threshold", fontsize=12)
+        ax.set_ylabel("Median BOA", fontsize=12)
+        ax.set_title(
             f"Threshold Optimization - {experiment} - {style['label']}",
             fontsize=14,
         )
-        plt.grid(alpha=0.3)
-        plt.legend(fontsize=12)
+        ax.grid(axis="y", alpha=0.3)
+        ax.legend(fontsize=12)
+        _clean_spines(ax)
         plt.tight_layout()
 
         if save_path:
@@ -293,7 +306,7 @@ class ResultsManager:
         x = np.arange(len(models))
         width = 0.35
 
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax, ax_tab = _make_fig_with_table(figsize)
         bars_oe = ax.bar(
             x - width / 2, oe_vals, width, label="Omission Error",
             color=colors, alpha=0.85, edgecolor="white",
@@ -314,9 +327,16 @@ class ResultsManager:
         ax.set_xticks(x)
         ax.set_xticklabels(labels, fontsize=10, rotation=15, ha="right")
         ax.set_ylabel("Error Rate", fontsize=12)
-        ax.set_title(f"Omission & Commission Error — {class_name}", fontsize=13)
+        ax.set_title(f"Omission & Commission Error \u2014 {class_name}", fontsize=13)
         ax.legend(fontsize=10)
         ax.grid(axis="y", alpha=0.3)
+        _clean_spines(ax)
+
+        # Table.
+        col_labels = ["Omission Error", "Commission Error"]
+        cell_text = [[f"{oe:.3f}", f"{ce:.3f}"] for oe, ce in zip(oe_vals, ce_vals)]
+        _add_table_below(fig, ax_tab, col_labels, labels, cell_text, colors)
+
         plt.tight_layout()
 
         if save_path:
@@ -357,7 +377,7 @@ class ResultsManager:
             colors.append(style["color"])
 
         y = np.arange(len(models))
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax, ax_tab = _make_fig_with_table(figsize)
         bars = ax.barh(y, totals, color=colors, alpha=0.85, edgecolor="white")
 
         for bar, val in zip(bars, totals):
@@ -373,6 +393,19 @@ class ResultsManager:
         ax.set_title("Model Parameter Counts", fontsize=13)
         ax.grid(axis="x", alpha=0.3)
         ax.invert_yaxis()
+        _clean_spines(ax)
+        # Keep bottom spine for horizontal bar chart.
+        ax.spines["bottom"].set_visible(True)
+
+        # Table.
+        trainable = [
+            f"{self.results[m].additional_info.get('trainable_params', 0) / 1e6:.2f}M"
+            for m in models
+        ]
+        col_labels = ["Total Params", "Trainable Params"]
+        cell_text = [[f"{t:.2f}M", tr] for t, tr in zip(totals, trainable)]
+        _add_table_below(fig, ax_tab, col_labels, labels, cell_text, colors)
+
         plt.tight_layout()
 
         if save_path:
@@ -652,7 +685,7 @@ class ResultsManager:
             colors.append(style["color"])
 
         y = np.arange(len(models))
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax, ax_tab = _make_fig_with_table(figsize)
         bars = ax.barh(
             y, times_ms, xerr=stds_ms, color=colors,
             alpha=0.85, edgecolor="white", capsize=3,
@@ -671,6 +704,14 @@ class ResultsManager:
         ax.set_title("Inference Cost Comparison", fontsize=13)
         ax.grid(axis="x", alpha=0.3)
         ax.invert_yaxis()
+        _clean_spines(ax)
+        ax.spines["bottom"].set_visible(True)
+
+        # Table.
+        col_labels = ["ms/image", "\u00b1 std"]
+        cell_text = [[f"{t:.1f}", f"{s:.1f}"] for t, s in zip(times_ms, stds_ms)]
+        _add_table_below(fig, ax_tab, col_labels, labels, cell_text, colors)
+
         plt.tight_layout()
 
         if save_path:
@@ -722,7 +763,11 @@ class ResultsManager:
             print("No parameter data. Call save_param_count() first.")
             return
 
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax, ax_tab = _make_fig_with_table(figsize)
+
+        table_rows: List[List[str]] = []
+        table_labels: List[str] = []
+        table_colors: List[str] = []
 
         for m in models:
             info = self.results[m].additional_info
@@ -760,6 +805,13 @@ class ResultsManager:
                 fontsize=9, color=style["color"],
             )
 
+            row = [f"{x_val:.2f}M", f"{y_val:.4f}"]
+            if s_val is not None:
+                row.append(f"{s_val:.1f} ms")
+            table_rows.append(row)
+            table_labels.append(style["label"])
+            table_colors.append(style["color"])
+
         y_label = "Mean IoU" if y_metric == "mean_iou" else y_metric.replace("_", " ").title()
         ax.set_xlabel("Parameters (M)", fontsize=12)
         ax.set_ylabel(y_label, fontsize=12)
@@ -768,6 +820,14 @@ class ResultsManager:
             title += " (bubble = inference time)"
         ax.set_title(title, fontsize=13)
         ax.grid(alpha=0.3)
+        _clean_spines(ax)
+
+        # Table.
+        col_labels = ["Params", y_label]
+        if size_metric:
+            col_labels.append("Inference")
+        _add_table_below(fig, ax_tab, col_labels, table_labels, table_rows, table_colors)
+
         plt.tight_layout()
 
         if save_path:

@@ -312,7 +312,7 @@ def plot_confusion_matrices_comparison(
         axes = [axes]
 
     for ax, model_name in zip(axes, model_names):
-        cm = results[model_name].conf_matrix
+        cm = results[model_name].confusion_matrix
         style = _get_style(model_name)
         plot_confusion_matrix(
             cm, normalize=True, class_names=class_names,

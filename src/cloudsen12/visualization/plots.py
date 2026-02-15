@@ -265,13 +265,16 @@ def plot_boa_distribution(
     palette = {_get_style(m)["label"]: _get_style(m)["color"] for m in model_names}
 
     sns.violinplot(
-        data=plot_df, x="Model", y="BOA", order=labels_order,
+        data=plot_df, x="Model", y="BOA", hue="Model",
+        order=labels_order, hue_order=labels_order,
         palette=palette, inner=None, alpha=0.3, ax=ax, cut=0,
+        legend=False,
     )
     sns.boxplot(
-        data=plot_df, x="Model", y="BOA", order=labels_order,
+        data=plot_df, x="Model", y="BOA", hue="Model",
+        order=labels_order, hue_order=labels_order,
         palette=palette, width=0.15, fliersize=1, ax=ax,
-        boxprops=dict(alpha=0.8),
+        boxprops=dict(alpha=0.8), legend=False,
     )
 
     ax.set_ylabel("BOA", fontsize=12)

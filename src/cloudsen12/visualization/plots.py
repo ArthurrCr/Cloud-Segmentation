@@ -857,3 +857,83 @@ def plot_qualitative_examples(
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
+
+
+def plot_qualitative_from_loader(
+    models_dict: Dict[str, tuple],
+    test_loader: "torch.utils.data.DataLoader",
+    n_samples: int = 4,
+    indices: Optional[List[int]] = None,
+    class_names: List[str] = CLASS_NAMES,
+    figsize_per_col: float = 3.0,
+    save_path: Optional[str] = None,
+) -> None:
+    """Convenience wrapper: run inference and plot qualitative examples.
+
+    Args:
+        models_dict: ``{model_name: (model_list, use_ensemble, normalize)}``.
+        test_loader: DataLoader yielding ``(images, ground_truths)`` batches.
+        n_samples: Number of sample patches to display.
+        indices: Specific patch indices. Overrides *n_samples* if given.
+    """
+    import torch
+
+    from cloudsen12.config.constants import SENTINEL_BANDS
+    from cloudsen12.inference.normalization import (
+        get_normalization_stats,
+        normalize_images,
+    )
+    from cloudsen12.inference.prediction import get_predictions
+
+    device = next(
+        (
+            str(next(ms[0][0].parameters()).device)
+            for ms in models_dict.values()
+        ),
+        "cpu",
+    )
+    mean, std = get_normalization_stats(device, False, SENTINEL_BANDS)
+
+    all_imgs, all_gts = [], []
+    for imgs, gts in test_loader:
+        for i in range(imgs.size(0)):
+            all_imgs.append(imgs[i])
+            all_gts.append(gts[i])
+
+    n_total = len(all_imgs)
+    if indices is None:
+        indices = np.linspace(0, n_total - 1, n_samples, dtype=int).tolist()
+
+    rgb_images = []
+    ground_truths = []
+    for idx in indices:
+        img_t = all_imgs[idx]
+        rgb = img_t[[3, 2, 1]].numpy().transpose(1, 2, 0)
+        rgb = np.clip(rgb / np.percentile(rgb, 98), 0, 1)
+        rgb_images.append(rgb)
+        ground_truths.append(all_gts[idx].numpy())
+
+    model_names = sort_models(list(models_dict.keys()))
+    predictions: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
+
+    for m_name in model_names:
+        model_list, use_ens, norm = models_dict[m_name]
+        for idx in indices:
+            inp = all_imgs[idx].unsqueeze(0).to(device).float()
+            if norm:
+                inp = normalize_images(inp, mean, std)
+            with torch.no_grad():
+                pred = get_predictions(
+                    model_list, inp, use_ensemble=use_ens,
+                )[0].cpu().numpy()
+            predictions[m_name].append(pred)
+
+    plot_qualitative_examples(
+        rgb_images=rgb_images,
+        ground_truths=ground_truths,
+        predictions=predictions,
+        indices=list(range(len(indices))),
+        class_names=class_names,
+        figsize_per_col=figsize_per_col,
+        save_path=save_path,
+    )

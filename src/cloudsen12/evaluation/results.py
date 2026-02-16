@@ -362,11 +362,15 @@ class ResultsManager:
         n_runs: int = 5,
         n_batches: int = 20,
     ) -> Dict[str, float]:
-        """Benchmark peak GPU memory across multiple runs.
+        """Benchmark peak GPU memory for a specific model across runs.
 
-        Runs *n_runs* independent rounds (each processing *n_batches*
-        batches) and records the peak memory for every round so that the
-        mean and standard deviation can be reported.
+        Since multiple models may be loaded on the GPU simultaneously,
+        this method isolates the memory footprint of the tested model by:
+
+        1. Computing the tested model's weight size directly.
+        2. Measuring only the activation/temporary memory overhead during
+           inference (peak minus baseline allocation).
+        3. Reporting ``model_weights + activation_overhead`` per run.
 
         Returns:
             Dict with ``mean_mb``, ``std_mb``, and the raw ``peaks_mb``
@@ -396,6 +400,15 @@ class ResultsManager:
         for m in models:
             m.eval()
 
+        # Model weights in MB (parameters + buffers).
+        model_bytes = 0
+        for m in models:
+            for p in m.parameters():
+                model_bytes += p.nelement() * p.element_size()
+            for b in m.buffers():
+                model_bytes += b.nelement() * b.element_size()
+        model_mb = model_bytes / (1024 ** 2)
+
         # Warmup (not measured).
         imgs, _ = next(iter(test_loader))
         imgs = imgs.to(device).float()
@@ -407,9 +420,10 @@ class ResultsManager:
 
         peaks_mb: List[float] = []
 
-        for run_idx in range(n_runs):
-            torch.cuda.reset_peak_memory_stats(device)
+        for _ in range(n_runs):
             torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats(device)
+            baseline = torch.cuda.memory_allocated(device)
 
             batch_iter = iter(test_loader)
             for _ in range(n_batches):
@@ -427,8 +441,9 @@ class ResultsManager:
                     get_predictions(models, imgs, use_ensemble=use_ensemble)
 
             torch.cuda.synchronize()
-            peak_bytes = torch.cuda.max_memory_allocated(device)
-            peaks_mb.append(peak_bytes / (1024 ** 2))
+            peak_total = torch.cuda.max_memory_allocated(device)
+            activation_overhead = (peak_total - baseline) / (1024 ** 2)
+            peaks_mb.append(model_mb + activation_overhead)
 
         mean_mb = float(np.mean(peaks_mb))
         std_mb = float(np.std(peaks_mb))
@@ -440,11 +455,14 @@ class ResultsManager:
         info["peak_memory_mean_mb"] = mean_mb
         info["peak_memory_std_mb"] = std_mb
         info["peak_memory_peaks_mb"] = peaks_mb
+        info["peak_memory_model_mb"] = round(model_mb, 1)
         info["peak_memory_n_runs"] = n_runs
 
         print(
-            f"{model_name}: peak memory {mean_mb:.1f} MB "
-            f"+/- {std_mb:.1f} MB ({n_runs} runs)"
+            f"{model_name}: {mean_mb:.1f} MB "
+            f"+/- {std_mb:.1f} MB "
+            f"(weights: {model_mb:.1f} MB) "
+            f"[{n_runs} runs]"
         )
         return {"mean_mb": mean_mb, "std_mb": std_mb, "peaks_mb": peaks_mb}
 

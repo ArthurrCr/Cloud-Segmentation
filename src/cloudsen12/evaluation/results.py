@@ -180,13 +180,18 @@ class ResultsManager:
         if normalize_imgs:
             imgs = normalize_images(imgs, mean, std)
         with torch.no_grad():
-            get_predictions(models, imgs, use_ensemble=use_ensemble)
+            preds = get_predictions(models, imgs, use_ensemble=use_ensemble)
+        del imgs, preds
         if "cuda" in device:
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
         run_averages = []
 
         for _ in range(n_runs):
+            if "cuda" in device:
+                torch.cuda.empty_cache()
+
             times = []
             batch_iter = iter(test_loader)
             for _ in range(n_batches):
@@ -205,12 +210,15 @@ class ResultsManager:
                 t0 = time.perf_counter()
 
                 with torch.no_grad():
-                    get_predictions(models, imgs, use_ensemble=use_ensemble)
+                    preds = get_predictions(
+                        models, imgs, use_ensemble=use_ensemble,
+                    )
 
                 if "cuda" in device:
                     torch.cuda.synchronize()
                 t1 = time.perf_counter()
                 times.append(t1 - t0)
+                del imgs, preds
 
             run_averages.append(float(np.mean(times)))
 
@@ -415,13 +423,16 @@ class ResultsManager:
         if normalize_imgs:
             imgs = normalize_images(imgs, mean, std)
         with torch.no_grad():
-            get_predictions(models, imgs, use_ensemble=use_ensemble)
+            preds = get_predictions(models, imgs, use_ensemble=use_ensemble)
+        del imgs, preds
         torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
         peaks_mb: List[float] = []
 
         for _ in range(n_runs):
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats(device)
             baseline = torch.cuda.memory_allocated(device)
 
@@ -438,12 +449,16 @@ class ResultsManager:
                     imgs = normalize_images(imgs, mean, std)
 
                 with torch.no_grad():
-                    get_predictions(models, imgs, use_ensemble=use_ensemble)
+                    preds = get_predictions(
+                        models, imgs, use_ensemble=use_ensemble,
+                    )
+                del imgs, preds
 
             torch.cuda.synchronize()
             peak_total = torch.cuda.max_memory_allocated(device)
             activation_overhead = (peak_total - baseline) / (1024 ** 2)
             peaks_mb.append(model_mb + activation_overhead)
+            torch.cuda.empty_cache()
 
         mean_mb = float(np.mean(peaks_mb))
         std_mb = float(np.std(peaks_mb))

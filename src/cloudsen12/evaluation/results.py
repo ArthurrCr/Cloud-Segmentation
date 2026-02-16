@@ -146,12 +146,17 @@ class ResultsManager:
         test_loader: torch.utils.data.DataLoader,
         use_ensemble: bool = False,
         normalize_imgs: bool = False,
+        n_runs: int = 5,
         n_batches: int = 20,
     ) -> float:
-        """Benchmark inference time and store in additional_info.
+        """Benchmark inference time across multiple independent runs.
+
+        Each run processes *n_batches* batches and computes its own
+        average batch time. The final mean and standard deviation are
+        computed across the *n_runs* run-level averages.
 
         Returns:
-            Average time per batch in seconds.
+            Grand mean time per batch in seconds.
         """
         from cloudsen12.config.constants import SENTINEL_BANDS
         from cloudsen12.inference.normalization import (
@@ -169,7 +174,7 @@ class ResultsManager:
         for m in models:
             m.eval()
 
-        # Warmup.
+        # Warmup (not measured).
         imgs, _ = next(iter(test_loader))
         imgs = imgs.to(device).float()
         if normalize_imgs:
@@ -179,48 +184,56 @@ class ResultsManager:
         if "cuda" in device:
             torch.cuda.synchronize()
 
-        times = []
-        batch_iter = iter(test_loader)
-        for _ in range(n_batches):
-            try:
-                imgs, _ = next(batch_iter)
-            except StopIteration:
-                batch_iter = iter(test_loader)
-                imgs, _ = next(batch_iter)
+        run_averages = []
 
-            imgs = imgs.to(device).float()
-            if normalize_imgs:
-                imgs = normalize_images(imgs, mean, std)
+        for _ in range(n_runs):
+            times = []
+            batch_iter = iter(test_loader)
+            for _ in range(n_batches):
+                try:
+                    imgs, _ = next(batch_iter)
+                except StopIteration:
+                    batch_iter = iter(test_loader)
+                    imgs, _ = next(batch_iter)
 
-            if "cuda" in device:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
+                imgs = imgs.to(device).float()
+                if normalize_imgs:
+                    imgs = normalize_images(imgs, mean, std)
 
-            with torch.no_grad():
-                get_predictions(models, imgs, use_ensemble=use_ensemble)
+                if "cuda" in device:
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
 
-            if "cuda" in device:
-                torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            times.append(t1 - t0)
+                with torch.no_grad():
+                    get_predictions(models, imgs, use_ensemble=use_ensemble)
 
-        avg = float(np.mean(times))
-        std_t = float(np.std(times))
+                if "cuda" in device:
+                    torch.cuda.synchronize()
+                t1 = time.perf_counter()
+                times.append(t1 - t0)
+
+            run_averages.append(float(np.mean(times)))
+
+        grand_mean = float(np.mean(run_averages))
+        grand_std = float(np.std(run_averages))
 
         if model_name not in self.results:
             raise ValueError(f"No results for '{model_name}'.")
 
         info = self.results[model_name].additional_info
-        info["avg_batch_time"] = avg
-        info["std_batch_time"] = std_t
+        info["avg_batch_time"] = grand_mean
+        info["std_batch_time"] = grand_std
         info["batch_size"] = test_loader.batch_size
+        info["inference_n_runs"] = n_runs
 
-        avg_per_img = avg / test_loader.batch_size
+        avg_per_img = grand_mean / test_loader.batch_size
+        std_per_img = grand_std / test_loader.batch_size
         print(
-            f"{model_name}: {avg:.4f}s/batch +/- {std_t:.4f}s "
-            f"({avg_per_img * 1000:.1f} ms/image)"
+            f"{model_name}: {grand_mean:.4f}s/batch +/- {grand_std:.4f}s "
+            f"({avg_per_img * 1000:.1f} +/- {std_per_img * 1000:.1f} ms/image) "
+            f"[{n_runs} runs]"
         )
-        return avg
+        return grand_mean
 
     # ------------------------------------------------------------------
     # Data accessors (prepare dicts consumed by plots.py functions)
@@ -334,6 +347,123 @@ class ResultsManager:
         with np.errstate(invalid="ignore", divide="ignore"):
             iou = intersection / union
         return float(np.nanmean(iou))
+
+    # ------------------------------------------------------------------
+    # Memory benchmarking
+    # ------------------------------------------------------------------
+
+    def benchmark_memory(
+        self,
+        model_name: str,
+        models: Union[torch.nn.Module, List[torch.nn.Module]],
+        test_loader: torch.utils.data.DataLoader,
+        use_ensemble: bool = False,
+        normalize_imgs: bool = False,
+        n_runs: int = 5,
+        n_batches: int = 20,
+    ) -> Dict[str, float]:
+        """Benchmark peak GPU memory across multiple runs.
+
+        Runs *n_runs* independent rounds (each processing *n_batches*
+        batches) and records the peak memory for every round so that the
+        mean and standard deviation can be reported.
+
+        Returns:
+            Dict with ``mean_mb``, ``std_mb``, and the raw ``peaks_mb``
+            list.
+        """
+        from cloudsen12.config.constants import SENTINEL_BANDS
+        from cloudsen12.inference.normalization import (
+            get_normalization_stats,
+            normalize_images,
+        )
+        from cloudsen12.inference.prediction import get_predictions
+
+        if not isinstance(models, list):
+            models = [models]
+
+        device = str(next(models[0].parameters()).device)
+        use_cuda = "cuda" in device
+
+        if not use_cuda:
+            raise RuntimeError(
+                "benchmark_memory requires a CUDA device. "
+                "CPU memory profiling is not supported."
+            )
+
+        mean, std = get_normalization_stats(device, False, SENTINEL_BANDS)
+
+        for m in models:
+            m.eval()
+
+        # Warmup (not measured).
+        imgs, _ = next(iter(test_loader))
+        imgs = imgs.to(device).float()
+        if normalize_imgs:
+            imgs = normalize_images(imgs, mean, std)
+        with torch.no_grad():
+            get_predictions(models, imgs, use_ensemble=use_ensemble)
+        torch.cuda.synchronize()
+
+        peaks_mb: List[float] = []
+
+        for run_idx in range(n_runs):
+            torch.cuda.reset_peak_memory_stats(device)
+            torch.cuda.synchronize()
+
+            batch_iter = iter(test_loader)
+            for _ in range(n_batches):
+                try:
+                    imgs, _ = next(batch_iter)
+                except StopIteration:
+                    batch_iter = iter(test_loader)
+                    imgs, _ = next(batch_iter)
+
+                imgs = imgs.to(device).float()
+                if normalize_imgs:
+                    imgs = normalize_images(imgs, mean, std)
+
+                with torch.no_grad():
+                    get_predictions(models, imgs, use_ensemble=use_ensemble)
+
+            torch.cuda.synchronize()
+            peak_bytes = torch.cuda.max_memory_allocated(device)
+            peaks_mb.append(peak_bytes / (1024 ** 2))
+
+        mean_mb = float(np.mean(peaks_mb))
+        std_mb = float(np.std(peaks_mb))
+
+        if model_name not in self.results:
+            raise ValueError(f"No results for '{model_name}'.")
+
+        info = self.results[model_name].additional_info
+        info["peak_memory_mean_mb"] = mean_mb
+        info["peak_memory_std_mb"] = std_mb
+        info["peak_memory_peaks_mb"] = peaks_mb
+        info["peak_memory_n_runs"] = n_runs
+
+        print(
+            f"{model_name}: peak memory {mean_mb:.1f} MB "
+            f"+/- {std_mb:.1f} MB ({n_runs} runs)"
+        )
+        return {"mean_mb": mean_mb, "std_mb": std_mb, "peaks_mb": peaks_mb}
+
+    def get_memory_data(
+        self, model_names: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, float]]:
+        """Return ``{model_name: {"mean_mb": ..., "std_mb": ...}}``."""
+        names = model_names or [
+            m for m in self.get_model_names()
+            if "peak_memory_mean_mb" in self.results[m].additional_info
+        ]
+        out = {}
+        for m in names:
+            info = self.results[m].additional_info
+            out[m] = {
+                "mean_mb": info["peak_memory_mean_mb"],
+                "std_mb": info["peak_memory_std_mb"],
+            }
+        return out
 
     # ------------------------------------------------------------------
     # Summary export

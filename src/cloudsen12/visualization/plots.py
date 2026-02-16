@@ -714,6 +714,71 @@ def plot_efficiency_bubble(
 
 
 # ------------------------------------------------------------------
+# Peak memory usage
+# ------------------------------------------------------------------
+
+
+def plot_peak_memory(
+    memory_data: Dict[str, Dict[str, float]],
+    model_names: Optional[List[str]] = None,
+    figsize: Tuple[int, int] = (10, 6),
+    save_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """Horizontal bar chart of peak GPU memory with error bars.
+
+    Args:
+        memory_data: ``{model_name: {"mean_mb": <float>,
+            "std_mb": <float>}}``.  Values obtained from
+            ``ResultsManager.get_memory_data()``.
+
+    Returns:
+        DataFrame with mean and std peak memory per model.
+    """
+    if model_names is None:
+        model_names = sort_models(list(memory_data.keys()))
+
+    labels, means, stds, colors = [], [], [], []
+    for m in model_names:
+        style = get_style(m)
+        labels.append(style["label"])
+        means.append(memory_data[m]["mean_mb"])
+        stds.append(memory_data[m].get("std_mb", 0.0))
+        colors.append(style["color"])
+
+    y = np.arange(len(model_names))
+    fig, ax = plt.subplots(figsize=figsize)
+    bars = ax.barh(
+        y, means, xerr=stds, color=colors,
+        alpha=0.85, edgecolor="white", capsize=4,
+    )
+
+    for bar, mean_val, std_val in zip(bars, means, stds):
+        ax.text(
+            bar.get_width() + max(means) * 0.02,
+            bar.get_y() + bar.get_height() / 2,
+            f"{mean_val:.1f} +/- {std_val:.1f} MB",
+            va="center", fontsize=10,
+        )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=10)
+    ax.set_xlabel("Peak Memory (MB)", fontsize=12)
+    ax.set_title("Peak GPU Memory Usage", fontsize=13)
+    ax.grid(axis="x", alpha=0.3)
+    ax.invert_yaxis()
+    clean_spines(ax)
+    ax.spines["bottom"].set_visible(True)
+
+    save_and_show(fig, save_path)
+
+    return pd.DataFrame({
+        "Model": labels,
+        "Peak Memory (MB)": [round(m, 1) for m in means],
+        "std (MB)": [round(s, 1) for s in stds],
+    })
+
+
+# ------------------------------------------------------------------
 # Qualitative examples
 # ------------------------------------------------------------------
 

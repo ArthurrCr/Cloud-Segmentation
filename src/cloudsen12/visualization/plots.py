@@ -785,6 +785,17 @@ def plot_peak_memory(
 _QUALITATIVE_CMAP = ListedColormap(["#2ecc71", "#e74c3c", "#f39c12", "#3498db"])
 
 
+def _compute_patch_miou(gt: np.ndarray, pred: np.ndarray, n_classes: int = 4) -> float:
+    """Compute mean IoU for a single patch."""
+    ious = []
+    for c in range(n_classes):
+        intersection = np.sum((gt == c) & (pred == c))
+        union = np.sum((gt == c) | (pred == c))
+        if union > 0:
+            ious.append(intersection / union)
+    return float(np.mean(ious)) if ious else 0.0
+
+
 def plot_qualitative_examples(
     rgb_images: List[np.ndarray],
     ground_truths: List[np.ndarray],
@@ -832,14 +843,20 @@ def plot_qualitative_examples(
         axes[row, 1].set_xticks([])
         axes[row, 1].set_yticks([])
 
+        gt = ground_truths[idx]
         for col, m_name in enumerate(model_names):
             style = get_style(m_name)
+            pred = predictions[m_name][idx]
+            miou = _compute_patch_miou(gt, pred, n_classes=len(class_names))
+
             axes[row, col + 2].imshow(
-                predictions[m_name][idx],
-                cmap=_QUALITATIVE_CMAP, vmin=0, vmax=3,
+                pred, cmap=_QUALITATIVE_CMAP, vmin=0, vmax=3,
             )
             axes[row, col + 2].set_title(
                 style["label"] if row == 0 else "", fontsize=10,
+            )
+            axes[row, col + 2].set_xlabel(
+                f"mIoU: {miou:.3f}", fontsize=9,
             )
             axes[row, col + 2].set_xticks([])
             axes[row, col + 2].set_yticks([])

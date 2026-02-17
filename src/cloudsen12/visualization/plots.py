@@ -894,24 +894,38 @@ def plot_qualitative_from_loader(
     )
     mean, std = get_normalization_stats(device, False, SENTINEL_BANDS)
 
-    all_imgs, all_gts = [], []
-    for imgs, gts in test_loader:
-        for i in range(imgs.size(0)):
-            all_imgs.append(imgs[i])
-            all_gts.append(gts[i])
-
-    n_total = len(all_imgs)
+    # Resolve indices without loading the full dataset.
+    n_total = len(test_loader.dataset)
     if indices is None:
         indices = np.linspace(0, n_total - 1, n_samples, dtype=int).tolist()
+
+    target_set = set(indices)
+
+    # Collect only the needed samples in a single pass.
+    collected: Dict[int, torch.Tensor] = {}
+    collected_gts: Dict[int, torch.Tensor] = {}
+    global_idx = 0
+
+    for imgs, gts in test_loader:
+        batch_size = imgs.size(0)
+        for i in range(batch_size):
+            if global_idx in target_set:
+                collected[global_idx] = imgs[i]
+                collected_gts[global_idx] = gts[i]
+            global_idx += 1
+            if len(collected) == len(target_set):
+                break
+        if len(collected) == len(target_set):
+            break
 
     rgb_images = []
     ground_truths = []
     for idx in indices:
-        img_t = all_imgs[idx]
+        img_t = collected[idx]
         rgb = img_t[[3, 2, 1]].numpy().transpose(1, 2, 0)
         rgb = np.clip(rgb / np.percentile(rgb, 98), 0, 1)
         rgb_images.append(rgb)
-        ground_truths.append(all_gts[idx].numpy())
+        ground_truths.append(collected_gts[idx].numpy())
 
     model_names = sort_models(list(models_dict.keys()))
     predictions: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
@@ -919,14 +933,19 @@ def plot_qualitative_from_loader(
     for m_name in model_names:
         model_list, use_ens, norm = models_dict[m_name]
         for idx in indices:
-            inp = all_imgs[idx].unsqueeze(0).to(device).float()
+            inp = collected[idx].unsqueeze(0).to(device).float()
             if norm:
                 inp = normalize_images(inp, mean, std)
             with torch.no_grad():
                 pred = get_predictions(
                     model_list, inp, use_ensemble=use_ens,
                 )[0].cpu().numpy()
+            del inp
             predictions[m_name].append(pred)
+
+    del collected, collected_gts
+    if "cuda" in device:
+        torch.cuda.empty_cache()
 
     plot_qualitative_examples(
         rgb_images=rgb_images,

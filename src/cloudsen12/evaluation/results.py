@@ -135,6 +135,42 @@ class ResultsManager:
             f"{trainable / 1e6:.2f}M trainable"
         )
 
+    def save_gflops(
+        self,
+        model_name: str,
+        model: torch.nn.Module,
+        input_shape: Tuple[int, ...] = (1, 13, 512, 512),
+    ) -> float:
+        """Compute and store GFLOPs for a model.
+
+        Uses ``thop.profile`` to count multiply-accumulate operations.
+
+        Args:
+            model_name: Key in results.
+            model: Model to profile.
+            input_shape: Shape of a dummy input tensor (B, C, H, W).
+
+        Returns:
+            GFLOPs value.
+        """
+        from thop import profile
+
+        if model_name not in self.results:
+            raise ValueError(
+                f"No results for '{model_name}'. Run evaluation first."
+            )
+
+        device = next(model.parameters()).device
+        dummy = torch.randn(*input_shape, device=device)
+
+        model.eval()
+        macs, _ = profile(model, inputs=(dummy,), verbose=False)
+        gflops = macs / 1e9
+
+        self.results[model_name].additional_info["gflops"] = gflops
+        print(f"{model_name}: {gflops:.2f} GFLOPs")
+        return gflops
+
     # ------------------------------------------------------------------
     # Inference benchmarking
     # ------------------------------------------------------------------
@@ -350,6 +386,7 @@ class ResultsManager:
 
             out[m] = {
                 "params_m": info.get("total_params", 0) / 1e6,
+                "gflops": info.get("gflops"),
                 "y_value": y_val,
                 "inference_ms": inf_ms,
             }

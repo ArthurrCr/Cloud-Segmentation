@@ -652,18 +652,22 @@ def plot_inference_cost(
 def plot_efficiency_bubble(
     bubble_data: Dict[str, Dict[str, float]],
     model_names: Optional[List[str]] = None,
+    x_axis: str = "gflops",
     y_label: str = "Mean IoU",
     figsize: Tuple[int, int] = (10, 7),
     save_path: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Bubble chart: parameters vs performance, sized by inference cost.
+    """Bubble chart: computational cost vs performance.
 
     Args:
         bubble_data: ``{model_name: {"params_m": <float>,
-            "y_value": <float>, "inference_ms": <float|None>}}``.
+            "gflops": <float|None>, "y_value": <float>,
+            "inference_ms": <float|None>}}``.
+        x_axis: ``"gflops"`` (default) or ``"params"`` for the
+            horizontal axis.
 
     Returns:
-        DataFrame with params, metric value, and inference time per model.
+        DataFrame with GFLOPs/params, metric value, and inference time.
     """
     if model_names is None:
         model_names = sort_models(list(bubble_data.keys()))
@@ -675,7 +679,13 @@ def plot_efficiency_bubble(
         d = bubble_data[m]
         style = get_style(m)
 
-        x_val = d["params_m"]
+        if x_axis == "gflops" and d.get("gflops") is not None:
+            x_val = d["gflops"]
+            x_label_name = "GFLOPs"
+        else:
+            x_val = d["params_m"]
+            x_label_name = "Parameters (M)"
+
         y_val = d["y_value"]
         inf_ms = d.get("inference_ms")
         bubble_size = max(inf_ms * 10, 80) if inf_ms is not None else 200
@@ -687,22 +697,31 @@ def plot_efficiency_bubble(
         )
         ax.annotate(
             style["label"], (x_val, y_val),
-            textcoords="offset points", xytext=(8, 8),
+            textcoords="offset points", xytext=(0, 14),
             fontsize=9, color=style["color"],
+            ha="center", weight="bold",
+        )
+        ax.annotate(
+            f"{x_val:.1f} {x_label_name}",
+            (x_val, y_val),
+            textcoords="offset points", xytext=(0, -18),
+            fontsize=8, color="gray", ha="center",
         )
 
         row = {
             "Model": style["label"],
-            "Params (M)": round(x_val, 2),
             y_label: round(y_val, 4),
         }
+        if d.get("gflops") is not None:
+            row["GFLOPs"] = round(d["gflops"], 2)
+        row["Params (M)"] = round(d["params_m"], 2)
         if inf_ms is not None:
             row["Inference (ms)"] = round(inf_ms, 1)
         table_rows.append(row)
 
-    ax.set_xlabel("Parameters (M)", fontsize=12)
+    ax.set_xlabel(x_label_name, fontsize=12)
     ax.set_ylabel(y_label, fontsize=12)
-    title = f"Efficiency: Parameters vs {y_label}"
+    title = f"Efficiency: {x_label_name} vs {y_label}"
     if any(bubble_data[m].get("inference_ms") for m in model_names):
         title += " (bubble = inference time)"
     ax.set_title(title, fontsize=13)

@@ -146,10 +146,18 @@ class ResultsManager:
         test_loader: torch.utils.data.DataLoader,
         use_ensemble: bool = False,
         normalize_imgs: bool = False,
+        dataset_scale: float = 1.0,
         n_runs: int = 5,
         n_batches: int = 20,
     ) -> float:
         """Benchmark inference time across multiple independent runs.
+
+        Args:
+            dataset_scale: Factor the dataset divided raw DN by. When
+                *normalize_imgs* is True the loader values are multiplied
+                back by this factor before applying ``normalize_images``
+                (which divides by 32767). Set to 1.0 if the loader
+                already returns raw DN values.
 
         Each run processes *n_batches* batches and computes its own
         average batch time. The final mean and standard deviation are
@@ -178,6 +186,7 @@ class ResultsManager:
         imgs, _ = next(iter(test_loader))
         imgs = imgs.to(device).float()
         if normalize_imgs:
+            imgs = imgs * dataset_scale
             imgs = normalize_images(imgs, mean, std)
         with torch.no_grad():
             preds = get_predictions(models, imgs, use_ensemble=use_ensemble)
@@ -203,6 +212,7 @@ class ResultsManager:
 
                 imgs = imgs.to(device).float()
                 if normalize_imgs:
+                    imgs = imgs * dataset_scale
                     imgs = normalize_images(imgs, mean, std)
 
                 if "cuda" in device:
@@ -367,10 +377,16 @@ class ResultsManager:
         test_loader: torch.utils.data.DataLoader,
         use_ensemble: bool = False,
         normalize_imgs: bool = False,
+        dataset_scale: float = 1.0,
         n_runs: int = 5,
         n_batches: int = 20,
     ) -> Dict[str, float]:
         """Benchmark peak GPU memory for a specific model across runs.
+
+        Args:
+            dataset_scale: Factor the dataset divided raw DN by. When
+                *normalize_imgs* is True the loader values are multiplied
+                back by this factor before applying ``normalize_images``.
 
         Since multiple models may be loaded on the GPU simultaneously,
         this method isolates the memory footprint of the tested model by:
@@ -421,6 +437,7 @@ class ResultsManager:
         imgs, _ = next(iter(test_loader))
         imgs = imgs.to(device).float()
         if normalize_imgs:
+            imgs = imgs * dataset_scale
             imgs = normalize_images(imgs, mean, std)
         with torch.no_grad():
             preds = get_predictions(models, imgs, use_ensemble=use_ensemble)
@@ -446,6 +463,7 @@ class ResultsManager:
 
                 imgs = imgs.to(device).float()
                 if normalize_imgs:
+                    imgs = imgs * dataset_scale
                     imgs = normalize_images(imgs, mean, std)
 
                 with torch.no_grad():

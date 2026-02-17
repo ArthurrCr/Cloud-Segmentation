@@ -864,6 +864,7 @@ def plot_qualitative_from_loader(
     test_loader: "torch.utils.data.DataLoader",
     n_samples: int = 4,
     indices: Optional[List[int]] = None,
+    dataset_scale: float = 1.0,
     class_names: List[str] = CLASS_NAMES,
     figsize_per_col: float = 3.0,
     save_path: Optional[str] = None,
@@ -875,6 +876,12 @@ def plot_qualitative_from_loader(
         test_loader: DataLoader yielding ``(images, ground_truths)`` batches.
         n_samples: Number of sample patches to display.
         indices: Specific patch indices. Overrides *n_samples* if given.
+        dataset_scale: Factor by which the dataset divided the raw DN
+            values. When a model requires CloudS2Mask normalization
+            (``norm=True``), the loader values are multiplied by this
+            factor to restore raw DN before applying
+            ``normalize_images`` (which divides by 32767). Set to 1.0
+            if the loader already returns raw DN values.
     """
     import torch
 
@@ -938,6 +945,7 @@ def plot_qualitative_from_loader(
         for idx in indices:
             inp = collected[idx].unsqueeze(0).to(device).float()
             if norm:
+                inp = inp * dataset_scale
                 inp = normalize_images(inp, mean, std)
             with torch.no_grad():
                 pred = get_predictions(

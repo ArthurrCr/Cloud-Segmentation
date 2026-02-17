@@ -925,7 +925,10 @@ def plot_qualitative_from_loader(
         rgb = img_t[[3, 2, 1]].numpy().transpose(1, 2, 0)
         rgb = np.clip(rgb / np.percentile(rgb, 98), 0, 1)
         rgb_images.append(rgb)
-        ground_truths.append(collected_gts[idx].numpy())
+        gt = collected_gts[idx].numpy()
+        if gt.ndim == 3:
+            gt = gt.squeeze(0)
+        ground_truths.append(gt)
 
     model_names = sort_models(list(models_dict.keys()))
     predictions: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
@@ -940,6 +943,8 @@ def plot_qualitative_from_loader(
                 pred = get_predictions(
                     model_list, inp, use_ensemble=use_ens,
                 )[0].cpu().numpy()
+            if pred.ndim == 3:
+                pred = pred.squeeze(0)
             del inp
             predictions[m_name].append(pred)
 

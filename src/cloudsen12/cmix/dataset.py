@@ -24,31 +24,48 @@ Experiment 2 (thick only):  positive = {1},      negative = {0, 3},
 
 from pathlib import Path
 from typing import Dict, List, Tuple
-from urllib.request import urlretrieve
-import zipfile
 
 import numpy as np
 import pandas as pd
+import requests
 
 
 # ---------------------------------------------------------------------------
 # Zenodo download
 # ---------------------------------------------------------------------------
 
-ZENODO_URL = "https://zenodo.org/record/5036991/files/PixBox.zip"
+# Zenodo migrated from /record/ to /records/ in 2023.
+# The PixBox dataset does not ship a single ZIP — it exposes individual files.
+_ZENODO_BASE = "https://zenodo.org/records/5036991/files"
+
+PIXBOX_CSV_FILENAME = "pixbox_sentinel2_cmix_20180425.csv"
+PIXBOX_DESC_FILENAME = "pixbox_sentinel2_cmix_20180425_description.txt"
+
+PIXBOX_FILES: Dict[str, str] = {
+    PIXBOX_CSV_FILENAME: f"{_ZENODO_BASE}/{PIXBOX_CSV_FILENAME}?download=1",
+    PIXBOX_DESC_FILENAME: f"{_ZENODO_BASE}/{PIXBOX_DESC_FILENAME}?download=1",
+}
 
 # CMIX class labels as stored in the PixBox CSV mapped to CloudSEN12 integers.
-# Adjust if the actual CSV uses different string/integer conventions.
+# The CSV stores integer codes; the description file maps them to strings.
+# Based on the PixBox description: 1=Clear, 2=Thick cloud, 3=Thin cloud, 4=Shadow.
+# We remap to CloudSEN12: 0=Clear, 1=Thick, 2=Thin, 3=Shadow.
 PIXBOX_LABEL_MAP: Dict[str, int] = {
+    # String variants (lower-cased).
     "clear": 0,
     "thick": 1,
     "thin": 2,
     "shadow": 3,
-    # Numeric variants in case the CSV stores integers as strings.
+    "cloud shadow": 3,
+    "thick cloud": 1,
+    "thin cloud": 2,
+    # PixBox native integer codes (as strings after str() conversion).
+    "1": 0,   # Clear
+    "2": 1,   # Thick cloud
+    "3": 2,   # Thin cloud
+    "4": 3,   # Cloud shadow
+    # Fallback: CloudSEN12-style integers already (0-based).
     "0": 0,
-    "1": 1,
-    "2": 2,
-    "3": 3,
 }
 
 CMIX_EXPERIMENTS: Dict[str, Dict] = {
@@ -67,40 +84,47 @@ CMIX_EXPERIMENTS: Dict[str, Dict] = {
 }
 
 
-def download_pixbox(local_dir: str = "./data/pixbox") -> Path:
-    """Download and extract the PixBox dataset from Zenodo.
+def _download_file(url: str, dest: Path) -> None:
+    """Download a single file with a streaming requests.get."""
+    response = requests.get(url, stream=True, timeout=60)
+    response.raise_for_status()
+    with open(dest, "wb") as f:
+        for chunk in response.iter_content(chunk_size=65536):
+            f.write(chunk)
 
-    Skips the download if the target directory already exists and is non-empty.
+
+def download_pixbox(local_dir: str = "./data/pixbox") -> Path:
+    """Download the PixBox label files from Zenodo.
+
+    Downloads only the CSV and description text file (the Sentinel-2 scene
+    images are a separate ~20 GB record and must be obtained independently).
+    Skips files that already exist on disk.
 
     Args:
-        local_dir: Destination directory for the extracted dataset.
+        local_dir: Destination directory for the downloaded files.
 
     Returns:
-        Path to the extracted dataset directory.
+        Path to the dataset directory.
     """
     out_dir = Path(local_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    zip_path = out_dir / "PixBox.zip"
+    csv_dest = out_dir / PIXBOX_CSV_FILENAME
+    if csv_dest.exists():
+        print(f"PixBox CSV already present: {csv_dest}")
+        return out_dir
 
-    if any(out_dir.iterdir()):
-        # Check for the actual data files, not just the zip.
-        csv_files = list(out_dir.rglob("*.csv"))
-        if csv_files:
-            print(f"PixBox already downloaded ({len(csv_files)} CSV files found).")
-            return out_dir
+    for filename, url in PIXBOX_FILES.items():
+        dest = out_dir / filename
+        if dest.exists():
+            print(f"  Already exists, skipping: {filename}")
+            continue
+        print(f"  Downloading: {filename}")
+        print(f"  URL: {url}")
+        _download_file(url, dest)
+        print(f"  Saved to: {dest}")
 
-    print(f"Downloading PixBox from Zenodo...")
-    print(f"  URL: {ZENODO_URL}")
-    urlretrieve(ZENODO_URL, zip_path)
-    print(f"  Saved to: {zip_path}")
-
-    print("Extracting...")
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(out_dir)
-    zip_path.unlink()
-    print(f"Extraction complete: {out_dir}")
-
+    print(f"PixBox download complete: {out_dir}")
     return out_dir
 
 
@@ -132,48 +156,62 @@ def _parse_label(raw: str) -> int:
 def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     """Load PixBox reference labels grouped by Sentinel-2 scene.
 
-    Searches for CSV files in the dataset directory. Each CSV is expected
-    to contain columns for the scene identifier, pixel row/column (or
-    lat/lon) and the reference class label.
+    Parses ``pixbox_sentinel2_cmix_20180425.csv`` downloaded from Zenodo.
+    The CSV schema (inferred from the PixBox description file) is::
 
-    The exact column names are inferred automatically from a set of known
-    variants used across PixBox releases.
+        product_id, row, col, class_id, [other columns...]
+
+    where ``class_id`` uses 1-based integer codes:
+        1 = Clear, 2 = Thick cloud, 3 = Thin cloud, 4 = Cloud shadow.
+
+    Column names are matched via aliases to handle minor schema variants.
 
     Args:
-        pixbox_dir: Root directory of the extracted PixBox dataset.
+        pixbox_dir: Directory containing the PixBox CSV file.
 
     Returns:
-        Dictionary mapping scene_id -> DataFrame with columns:
-            row, col, label (CloudSEN12 integer class).
+        Dictionary mapping scene/product_id -> DataFrame with columns:
+            row, col, label (CloudSEN12 integer: 0=Clear, 1=Thick,
+            2=Thin, 3=Shadow).
 
     Raises:
         FileNotFoundError: If no CSV files are found.
-        KeyError: If expected columns are absent from the CSV.
+        KeyError: If expected columns are absent (prints available columns).
     """
     root = Path(pixbox_dir)
-    csv_files = sorted(root.rglob("*.csv"))
+
+    # Prefer the canonical filename; fall back to any CSV in the directory.
+    canonical = root / PIXBOX_CSV_FILENAME
+    if canonical.exists():
+        csv_files = [canonical]
+    else:
+        csv_files = sorted(root.rglob("*.csv"))
 
     if not csv_files:
         raise FileNotFoundError(
             f"No CSV files found in '{root}'. "
-            "Verify that the PixBox dataset was extracted correctly."
+            f"Run download_pixbox('{pixbox_dir}') first."
         )
 
     print(f"Found {len(csv_files)} CSV file(s) in '{root}'.")
 
-    # Column name aliases for different PixBox versions.
-    _row_aliases = {"row", "pixel_row", "y", "line"}
-    _col_aliases = {"col", "pixel_col", "column", "x", "sample"}
-    _label_aliases = {"class", "label", "reference", "ref_class", "cloud_mask"}
-    _scene_aliases = {"scene", "scene_id", "granule", "tile", "image"}
+    # Column name aliases — ordered by priority (first match wins).
+    _row_aliases = {"row", "pixel_row", "line", "y_pixel", "y"}
+    _col_aliases = {"col", "column", "pixel_col", "sample", "x_pixel", "x"}
+    _label_aliases = {"class_id", "class", "label", "cloud_class",
+                      "reference", "ref_class", "cloud_mask"}
+    _scene_aliases = {"product_id", "scene_id", "scene", "granule",
+                      "tile", "image", "s2_product"}
 
-    def _find_col(columns: List[str], aliases: set) -> str:
+    def _find_col(columns: List[str], aliases: set, context: str) -> str:
         for c in columns:
             if c.lower() in aliases:
                 return c
         raise KeyError(
-            f"Could not find column. Searched aliases: {aliases}. "
-            f"Available columns: {columns}"
+            f"Cannot identify {context} column.\n"
+            f"  Searched aliases : {sorted(aliases)}\n"
+            f"  Available columns: {columns}\n"
+            f"  Open the description .txt file in '{root}' for the exact schema."
         )
 
     scenes: Dict[str, List[pd.DataFrame]] = {}
@@ -181,14 +219,15 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     for csv_path in csv_files:
         df_raw = pd.read_csv(csv_path)
         cols = list(df_raw.columns)
+        print(f"  Columns in '{csv_path.name}': {cols}")
 
-        row_col = _find_col(cols, _row_aliases)
-        col_col = _find_col(cols, _col_aliases)
-        label_col = _find_col(cols, _label_aliases)
+        row_col = _find_col(cols, _row_aliases, "row")
+        col_col = _find_col(cols, _col_aliases, "col")
+        label_col = _find_col(cols, _label_aliases, "label")
 
-        # Scene identifier: use filename stem if no scene column exists.
+        # Scene identifier: prefer dedicated scene column; fall back to stem.
         try:
-            scene_col = _find_col(cols, _scene_aliases)
+            scene_col = _find_col(cols, _scene_aliases, "scene_id")
             scene_ids = df_raw[scene_col].astype(str)
         except KeyError:
             scene_ids = pd.Series([csv_path.stem] * len(df_raw))

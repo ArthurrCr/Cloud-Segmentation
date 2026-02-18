@@ -215,11 +215,13 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     print(f"Found {len(csv_files)} CSV file(s) in '{root}'.")
 
     # Column aliases — ordered by priority (first match wins).
-    _row_aliases = {"row", "pixel_row", "line", "y_pixel", "y"}
-    _col_aliases = {"col", "column", "pixel_col", "sample", "x_pixel", "x"}
+    # Actual PixBox CSV uses: PIXEL_X (col), PIXEL_Y (row),
+    # PRODUCT_ID (scene), CLOUD_TYPE_ID (label).
+    _row_aliases = {"pixel_y", "row", "pixel_row", "line", "y_pixel", "y"}
+    _col_aliases = {"pixel_x", "col", "column", "pixel_col", "sample", "x_pixel", "x"}
     _label_aliases = {
-        "class_id", "class", "label", "cloud_class",
-        "reference", "ref_class", "cloud_mask",
+        "cloud_type_id", "class_id", "class", "label", "cloud_class",
+        "reference", "ref_class", "cloud_mask", "cloud_type",
     }
     _scene_aliases = {
         "product_id", "scene_id", "scene", "granule",
@@ -247,6 +249,9 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
         row_col = _find_col(cols, _row_aliases, "row")
         col_col = _find_col(cols, _col_aliases, "col")
         label_col = _find_col(cols, _label_aliases, "label")
+
+        unique_labels = sorted(df_raw[label_col].dropna().unique().tolist())
+        print(f"  Label column: '{label_col}' | unique values: {unique_labels}")
 
         try:
             scene_col = _find_col(cols, _scene_aliases, "scene_id")

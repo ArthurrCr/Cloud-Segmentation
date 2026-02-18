@@ -215,13 +215,18 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     print(f"Found {len(csv_files)} CSV file(s) in '{root}'.")
 
     # Column aliases — ordered by priority (first match wins).
-    # Actual PixBox CSV uses: PIXEL_X (col), PIXEL_Y (row),
-    # PRODUCT_ID (scene), CLOUD_TYPE_ID (label).
+    # Actual PixBox CSV schema:
+    #   PIXEL_X = column index, PIXEL_Y = row index, PRODUCT_ID = scene,
+    #   CLOUD_CHARACTERISTICS_ID = primary cloud/clear label for CMIX.
+    # CLOUD_TYPE_ID only contains cloud sub-type (thin/thick) and is 1 for
+    # all non-cloud pixels, so it must NOT be used as the primary label.
     _row_aliases = {"pixel_y", "row", "pixel_row", "line", "y_pixel", "y"}
     _col_aliases = {"pixel_x", "col", "column", "pixel_col", "sample", "x_pixel", "x"}
     _label_aliases = {
-        "cloud_type_id", "class_id", "class", "label", "cloud_class",
-        "reference", "ref_class", "cloud_mask", "cloud_type",
+        "cloud_characteristics_id", "cloud_char_id",
+        "class_id", "class", "label", "cloud_class",
+        "reference", "ref_class", "cloud_mask",
+        "cloud_type_id", "cloud_type",
     }
     _scene_aliases = {
         "product_id", "scene_id", "scene", "granule",
@@ -250,8 +255,13 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
         col_col = _find_col(cols, _col_aliases, "col")
         label_col = _find_col(cols, _label_aliases, "label")
 
-        unique_labels = sorted(df_raw[label_col].dropna().unique().tolist())
-        print(f"  Label column: '{label_col}' | unique values: {unique_labels}")
+        # Print unique values for all *_ID columns to help verify the mapping.
+        id_cols = [c for c in cols if c.upper().endswith("_ID")]
+        print("  Unique values per ID column (first 10 each):")
+        for c in id_cols:
+            uvals = sorted(df_raw[c].dropna().unique().tolist())[:10]
+            print(f"    {c}: {uvals}")
+        print(f"  -> Using '{label_col}' as class label.")
 
         try:
             scene_col = _find_col(cols, _scene_aliases, "scene_id")

@@ -89,13 +89,11 @@ class CmixEvaluator:
         patch_size: int = 512,
         stride: int = 256,
         inference_batch_size: int = 8,
-        scene_id_map: dict = None,
     ) -> None:
         self.pixbox_dir = Path(pixbox_dir)
         self.scenes_dir = Path(scenes_dir)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._scene_id_map = scene_id_map or {}
 
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.patch_size = patch_size

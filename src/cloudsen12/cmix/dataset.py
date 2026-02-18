@@ -22,6 +22,7 @@ Experiment 2 (thick only):  positive = {1},      negative = {0, 3},
                             pixels with label=2 are excluded entirely.
 """
 
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -34,38 +35,34 @@ import requests
 # Zenodo download
 # ---------------------------------------------------------------------------
 
-# Zenodo migrated from /record/ to /records/ in 2023.
-# The PixBox dataset does not ship a single ZIP — it exposes individual files.
-_ZENODO_BASE = "https://zenodo.org/records/5036991/files"
-
+# The PixBox dataset ships as a single 1.5 MB ZIP (PixBox-S2-CMIX.zip)
+# containing the CSV and description txt. The Sentinel-2 scenes are in a
+# separate 22 GB ZIP that must be obtained independently via SCENES_DIR.
+PIXBOX_ZIP_URL = (
+    "https://zenodo.org/records/5036991/files/PixBox-S2-CMIX.zip?download=1"
+)
+PIXBOX_ZIP_FILENAME = "PixBox-S2-CMIX.zip"
 PIXBOX_CSV_FILENAME = "pixbox_sentinel2_cmix_20180425.csv"
 PIXBOX_DESC_FILENAME = "pixbox_sentinel2_cmix_20180425_description.txt"
 
-PIXBOX_FILES: Dict[str, str] = {
-    PIXBOX_CSV_FILENAME: f"{_ZENODO_BASE}/{PIXBOX_CSV_FILENAME}?download=1",
-    PIXBOX_DESC_FILENAME: f"{_ZENODO_BASE}/{PIXBOX_DESC_FILENAME}?download=1",
-}
-
 # CMIX class labels as stored in the PixBox CSV mapped to CloudSEN12 integers.
-# The CSV stores integer codes; the description file maps them to strings.
-# Based on the PixBox description: 1=Clear, 2=Thick cloud, 3=Thin cloud, 4=Shadow.
-# We remap to CloudSEN12: 0=Clear, 1=Thick, 2=Thin, 3=Shadow.
+# The CSV stores 1-based integer codes:
+#   1 = Clear, 2 = Thick cloud, 3 = Thin cloud, 4 = Cloud shadow
+# Remapped to CloudSEN12 0-based: 0=Clear, 1=Thick, 2=Thin, 3=Shadow.
 PIXBOX_LABEL_MAP: Dict[str, int] = {
-    # String variants (lower-cased).
+    # PixBox native 1-based codes.
+    "1": 0,   # Clear       -> CloudSEN12 Clear
+    "2": 1,   # Thick cloud -> CloudSEN12 Thick
+    "3": 2,   # Thin cloud  -> CloudSEN12 Thin
+    "4": 3,   # Shadow      -> CloudSEN12 Shadow
+    # String variants (lower-cased), in case the CSV uses text labels.
     "clear": 0,
     "thick": 1,
+    "thick cloud": 1,
     "thin": 2,
+    "thin cloud": 2,
     "shadow": 3,
     "cloud shadow": 3,
-    "thick cloud": 1,
-    "thin cloud": 2,
-    # PixBox native integer codes (as strings after str() conversion).
-    "1": 0,   # Clear
-    "2": 1,   # Thick cloud
-    "3": 2,   # Thin cloud
-    "4": 3,   # Cloud shadow
-    # Fallback: CloudSEN12-style integers already (0-based).
-    "0": 0,
 }
 
 CMIX_EXPERIMENTS: Dict[str, Dict] = {
@@ -84,9 +81,13 @@ CMIX_EXPERIMENTS: Dict[str, Dict] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+
 def _download_file(url: str, dest: Path) -> None:
-    """Download a single file with a streaming requests.get."""
-    response = requests.get(url, stream=True, timeout=60)
+    """Stream-download a file via requests."""
+    response = requests.get(url, stream=True, timeout=120)
     response.raise_for_status()
     with open(dest, "wb") as f:
         for chunk in response.iter_content(chunk_size=65536):
@@ -94,14 +95,18 @@ def _download_file(url: str, dest: Path) -> None:
 
 
 def download_pixbox(local_dir: str = "./data/pixbox") -> Path:
-    """Download the PixBox label files from Zenodo.
+    """Download and extract the PixBox-S2-CMIX ZIP from Zenodo.
 
-    Downloads only the CSV and description text file (the Sentinel-2 scene
-    images are a separate ~20 GB record and must be obtained independently).
-    Skips files that already exist on disk.
+    Downloads ``PixBox-S2-CMIX.zip`` (1.5 MB) which contains the CSV of
+    17,351 labeled pixels and the class-description txt file. Skips the
+    download if the CSV already exists on disk.
+
+    Note: The 29 Sentinel-2 L1C scenes (22 GB ZIP) must be downloaded
+    separately and pointed to via the ``scenes_dir`` argument of
+    ``CmixEvaluator``.
 
     Args:
-        local_dir: Destination directory for the downloaded files.
+        local_dir: Destination directory for the extracted files.
 
     Returns:
         Path to the dataset directory.
@@ -114,15 +119,24 @@ def download_pixbox(local_dir: str = "./data/pixbox") -> Path:
         print(f"PixBox CSV already present: {csv_dest}")
         return out_dir
 
-    for filename, url in PIXBOX_FILES.items():
-        dest = out_dir / filename
-        if dest.exists():
-            print(f"  Already exists, skipping: {filename}")
-            continue
-        print(f"  Downloading: {filename}")
-        print(f"  URL: {url}")
-        _download_file(url, dest)
-        print(f"  Saved to: {dest}")
+    zip_dest = out_dir / PIXBOX_ZIP_FILENAME
+    print(f"Downloading PixBox-S2-CMIX.zip from Zenodo...")
+    print(f"  URL: {PIXBOX_ZIP_URL}")
+    _download_file(PIXBOX_ZIP_URL, zip_dest)
+    print(f"  Saved: {zip_dest} ({zip_dest.stat().st_size / 1024:.0f} KB)")
+
+    print("Extracting...")
+    with zipfile.ZipFile(zip_dest, "r") as zf:
+        zf.extractall(out_dir)
+    zip_dest.unlink()
+
+    # Verify expected files were extracted.
+    for fname in (PIXBOX_CSV_FILENAME, PIXBOX_DESC_FILENAME):
+        matches = list(out_dir.rglob(fname))
+        if not matches:
+            print(f"  WARNING: '{fname}' not found after extraction.")
+        else:
+            print(f"  Extracted: {matches[0]}")
 
     print(f"PixBox download complete: {out_dir}")
     return out_dir
@@ -132,11 +146,11 @@ def download_pixbox(local_dir: str = "./data/pixbox") -> Path:
 # Label parsing
 # ---------------------------------------------------------------------------
 
-def _parse_label(raw: str) -> int:
-    """Convert a raw label string to a CloudSEN12 integer class.
+def _parse_label(raw) -> int:
+    """Convert a raw CSV label to a CloudSEN12 integer class (0-3).
 
     Args:
-        raw: Raw label value from the CSV (string or numeric).
+        raw: Raw label value from the CSV (int or string).
 
     Returns:
         Integer class index (0=Clear, 1=Thick, 2=Thin, 3=Shadow).
@@ -148,7 +162,7 @@ def _parse_label(raw: str) -> int:
     if key in PIXBOX_LABEL_MAP:
         return PIXBOX_LABEL_MAP[key]
     raise ValueError(
-        f"Unknown CMIX label '{raw}'. "
+        f"Unknown PixBox label '{raw}'. "
         f"Expected one of: {list(PIXBOX_LABEL_MAP.keys())}"
     )
 
@@ -156,18 +170,19 @@ def _parse_label(raw: str) -> int:
 def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     """Load PixBox reference labels grouped by Sentinel-2 scene.
 
-    Parses ``pixbox_sentinel2_cmix_20180425.csv`` downloaded from Zenodo.
-    The CSV schema (inferred from the PixBox description file) is::
+    Parses ``pixbox_sentinel2_cmix_20180425.csv`` from the downloaded
+    PixBox-S2-CMIX ZIP. Column names are matched via aliases to handle
+    minor schema variants across PixBox releases.
+
+    Expected CSV schema (from the PixBox description file)::
 
         product_id, row, col, class_id, [other columns...]
 
     where ``class_id`` uses 1-based integer codes:
-        1 = Clear, 2 = Thick cloud, 3 = Thin cloud, 4 = Cloud shadow.
-
-    Column names are matched via aliases to handle minor schema variants.
+        1=Clear, 2=Thick cloud, 3=Thin cloud, 4=Cloud shadow.
 
     Args:
-        pixbox_dir: Directory containing the PixBox CSV file.
+        pixbox_dir: Directory containing the extracted PixBox CSV file.
 
     Returns:
         Dictionary mapping scene/product_id -> DataFrame with columns:
@@ -176,16 +191,20 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
 
     Raises:
         FileNotFoundError: If no CSV files are found.
-        KeyError: If expected columns are absent (prints available columns).
+        KeyError: If expected columns are absent (available columns are
+            printed to assist debugging).
     """
     root = Path(pixbox_dir)
 
-    # Prefer the canonical filename; fall back to any CSV in the directory.
+    # Prefer the canonical filename; fall back to any CSV found.
     canonical = root / PIXBOX_CSV_FILENAME
     if canonical.exists():
         csv_files = [canonical]
     else:
-        csv_files = sorted(root.rglob("*.csv"))
+        # The ZIP may extract into a subdirectory.
+        csv_files = sorted(root.rglob(PIXBOX_CSV_FILENAME))
+        if not csv_files:
+            csv_files = sorted(root.rglob("*.csv"))
 
     if not csv_files:
         raise FileNotFoundError(
@@ -195,13 +214,17 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
 
     print(f"Found {len(csv_files)} CSV file(s) in '{root}'.")
 
-    # Column name aliases — ordered by priority (first match wins).
+    # Column aliases — ordered by priority (first match wins).
     _row_aliases = {"row", "pixel_row", "line", "y_pixel", "y"}
     _col_aliases = {"col", "column", "pixel_col", "sample", "x_pixel", "x"}
-    _label_aliases = {"class_id", "class", "label", "cloud_class",
-                      "reference", "ref_class", "cloud_mask"}
-    _scene_aliases = {"product_id", "scene_id", "scene", "granule",
-                      "tile", "image", "s2_product"}
+    _label_aliases = {
+        "class_id", "class", "label", "cloud_class",
+        "reference", "ref_class", "cloud_mask",
+    }
+    _scene_aliases = {
+        "product_id", "scene_id", "scene", "granule",
+        "tile", "image", "s2_product",
+    }
 
     def _find_col(columns: List[str], aliases: set, context: str) -> str:
         for c in columns:
@@ -211,7 +234,7 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
             f"Cannot identify {context} column.\n"
             f"  Searched aliases : {sorted(aliases)}\n"
             f"  Available columns: {columns}\n"
-            f"  Open the description .txt file in '{root}' for the exact schema."
+            f"  Check the description .txt in '{root}' for the exact schema."
         )
 
     scenes: Dict[str, List[pd.DataFrame]] = {}
@@ -225,7 +248,6 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
         col_col = _find_col(cols, _col_aliases, "col")
         label_col = _find_col(cols, _label_aliases, "label")
 
-        # Scene identifier: prefer dedicated scene column; fall back to stem.
         try:
             scene_col = _find_col(cols, _scene_aliases, "scene_id")
             scene_ids = df_raw[scene_col].astype(str)
@@ -238,14 +260,16 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
         df_raw["_label"] = df_raw[label_col].apply(_parse_label)
 
         for scene_id, group in df_raw.groupby("_scene"):
-            entry = group[["_row", "_col", "_label"]].rename(
-                columns={"_row": "row", "_col": "col", "_label": "label"}
-            ).reset_index(drop=True)
-            scenes.setdefault(scene_id, []).append(entry)
+            entry = (
+                group[["_row", "_col", "_label"]]
+                .rename(columns={"_row": "row", "_col": "col", "_label": "label"})
+                .reset_index(drop=True)
+            )
+            scenes.setdefault(str(scene_id), []).append(entry)
 
     result: Dict[str, pd.DataFrame] = {
-        scene_id: pd.concat(frames, ignore_index=True)
-        for scene_id, frames in scenes.items()
+        sid: pd.concat(frames, ignore_index=True)
+        for sid, frames in scenes.items()
     }
 
     total_pixels = sum(len(df) for df in result.values())
@@ -264,13 +288,14 @@ def extract_predictions_at_pixels(
     """Extract model predictions at labeled pixel coordinates.
 
     Args:
-        pred_mask: Full-scene prediction array of shape (H, W) with integer
-            class indices.
-        pixels_df: DataFrame with columns 'row' and 'col' (pixel coordinates
-            within the scene, zero-indexed).
+        pred_mask: Full-scene prediction array (H, W) with integer class
+            indices (0-based CloudSEN12).
+        pixels_df: DataFrame with columns 'row' and 'col' (zero-indexed
+            pixel coordinates within the scene).
 
     Returns:
         1-D integer array of predicted classes, aligned with pixels_df rows.
+        Coordinates outside scene bounds are returned as -1.
     """
     rows = pixels_df["row"].to_numpy(dtype=np.int64)
     cols = pixels_df["col"].to_numpy(dtype=np.int64)
@@ -280,8 +305,8 @@ def extract_predictions_at_pixels(
     if not valid.all():
         n_invalid = (~valid).sum()
         print(
-            f"  WARNING: {n_invalid} pixel coordinate(s) are outside the "
-            f"scene bounds ({h}x{w}) and will be skipped."
+            f"  WARNING: {n_invalid} pixel coordinate(s) outside scene bounds "
+            f"({h}x{w}) — these will be excluded from metrics."
         )
 
     preds = np.full(len(rows), fill_value=-1, dtype=np.int64)
@@ -290,18 +315,18 @@ def extract_predictions_at_pixels(
 
 
 # ---------------------------------------------------------------------------
-# Experiment filtering helpers
+# Experiment filtering
 # ---------------------------------------------------------------------------
 
 def apply_experiment_filter(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     experiment: str,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Convert multi-class arrays to binary arrays for a CMIX experiment.
 
-    Pixels belonging to the 'exclude' set of the experiment (e.g., thin
-    cloud in the thick-only experiment) are dropped.
+    Pixels belonging to the 'exclude' set (e.g., thin cloud in the
+    thick-only experiment) and invalid pixels (value -1) are dropped.
 
     Args:
         y_true: Reference class labels (CloudSEN12 integers).
@@ -309,23 +334,22 @@ def apply_experiment_filter(
         experiment: Key in CMIX_EXPERIMENTS ('all_clouds' or 'thick_only').
 
     Returns:
-        Tuple (y_true_bin, y_pred_bin, valid_mask, original_indices):
+        Tuple (y_true_bin, y_pred_bin, valid_mask):
             y_true_bin: Binary reference (1=positive, 0=negative).
             y_pred_bin: Binary prediction (1=positive, 0=negative).
-            valid_mask: Boolean mask applied to the input arrays.
+            valid_mask: Boolean mask applied to input arrays.
     """
     cfg = CMIX_EXPERIMENTS[experiment]
     pos = cfg["pos"]
     neg = cfg["neg"]
-    exclude = cfg["exclude"]
 
-    # Keep only pixels that are not in the excluded set and are valid (>=0).
-    valid = np.isin(y_true, list(pos | neg)) & (y_true >= 0) & (y_pred >= 0)
+    valid = (
+        np.isin(y_true, list(pos | neg))
+        & (y_true >= 0)
+        & (y_pred >= 0)
+    )
 
-    y_true_filtered = y_true[valid]
-    y_pred_filtered = y_pred[valid]
-
-    y_true_bin = np.isin(y_true_filtered, list(pos)).astype(np.int64)
-    y_pred_bin = np.isin(y_pred_filtered, list(pos)).astype(np.int64)
+    y_true_bin = np.isin(y_true[valid], list(pos)).astype(np.int64)
+    y_pred_bin = np.isin(y_pred[valid], list(pos)).astype(np.int64)
 
     return y_true_bin, y_pred_bin, valid

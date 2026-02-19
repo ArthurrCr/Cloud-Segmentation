@@ -45,25 +45,42 @@ PIXBOX_ZIP_FILENAME = "PixBox-S2-CMIX.zip"
 PIXBOX_CSV_FILENAME = "pixbox_sentinel2_cmix_20180425.csv"
 PIXBOX_DESC_FILENAME = "pixbox_sentinel2_cmix_20180425_description.txt"
 
-# CMIX class labels as stored in the PixBox CSV mapped to CloudSEN12 integers.
-# The CSV stores 1-based integer codes:
-#   1 = Clear, 2 = Thick cloud, 3 = Thin cloud, 4 = Cloud shadow
-# Remapped to CloudSEN12 0-based: 0=Clear, 1=Thick, 2=Thin, 3=Shadow.
-PIXBOX_LABEL_MAP: Dict[str, int] = {
-    # PixBox native 1-based codes.
-    "1": 0,   # Clear       -> CloudSEN12 Clear
-    "2": 1,   # Thick cloud -> CloudSEN12 Thick
-    "3": 2,   # Thin cloud  -> CloudSEN12 Thin
-    "4": 3,   # Shadow      -> CloudSEN12 Shadow
-    # String variants (lower-cased), in case the CSV uses text labels.
-    "clear": 0,
-    "thick": 1,
-    "thick cloud": 1,
-    "thin": 2,
-    "thin cloud": 2,
-    "shadow": 3,
-    "cloud shadow": 3,
+# CLOUD_CHARACTERISTICS_ID mapping to CloudSEN12 integers.
+# The PixBox CSV uses a detailed 0-12 scheme for cloud characteristics:
+#   0 = None of the classes    -> exclude (-1)
+#   1 = None (no cloud)        -> 0 (Clear)
+#   2 = Opaque                 -> 1 (Thick Cloud)
+#   3 = Semi-transparent       -> 2 (Thin Cloud)
+#   4 = Thick semi-transparent -> 2 (Thin Cloud)
+#   5 = Avg semi-transparent   -> 2 (Thin Cloud)
+#   6 = Thin semi-transparent  -> 2 (Thin Cloud)
+#   7 = Clear                  -> 0 (Clear)
+#   8 = Spatially mixed cloud  -> exclude (-1)
+#   9 = Condensation trail     -> 2 (Thin Cloud)
+#  10 = Fog                    -> 2 (Thin Cloud)
+#  11 = Haze                   -> 2 (Thin Cloud)
+#  12 = Cloud border           -> exclude (-1)
+#
+# Cloud Shadow is derived from SHADOW_ID == 3, handled in load_pixbox_labels.
+CLOUD_CHAR_MAP: Dict[int, int] = {
+    0: -1,   # None of the classes -> exclude
+    1:  0,   # None (no cloud)     -> Clear
+    2:  1,   # Opaque              -> Thick Cloud
+    3:  2,   # Semi-transparent    -> Thin Cloud
+    4:  2,   # Thick semi-transp.  -> Thin Cloud
+    5:  2,   # Avg semi-transp.    -> Thin Cloud
+    6:  2,   # Thin semi-transp.   -> Thin Cloud
+    7:  0,   # Clear               -> Clear
+    8: -1,   # Spatially mixed     -> exclude
+    9:  2,   # Condensation trail  -> Thin Cloud
+    10: 2,   # Fog                 -> Thin Cloud
+    11: 2,   # Haze                -> Thin Cloud
+    12: -1,  # Cloud border        -> exclude
 }
+
+# SHADOW_ID values from the PixBox description.
+# Only SHADOW_ID == 3 (Cloud shadow) maps to CloudSEN12 class 3.
+SHADOW_CLOUD_ID = 3
 
 CMIX_EXPERIMENTS: Dict[str, Dict] = {
     "all_clouds": {
@@ -146,40 +163,32 @@ def download_pixbox(local_dir: str = "./data/pixbox") -> Path:
 # Label parsing
 # ---------------------------------------------------------------------------
 
-def _parse_label(raw) -> int:
-    """Convert a raw CSV label to a CloudSEN12 integer class (0-3).
+def _map_cloud_char(value: int) -> int:
+    """Map a CLOUD_CHARACTERISTICS_ID value to CloudSEN12 class.
 
     Args:
-        raw: Raw label value from the CSV (int or string).
+        value: Integer from the CLOUD_CHARACTERISTICS_ID column (0-12).
 
     Returns:
-        Integer class index (0=Clear, 1=Thick, 2=Thin, 3=Shadow).
-
-    Raises:
-        ValueError: If the label cannot be mapped.
+        CloudSEN12 class (0=Clear, 1=Thick, 2=Thin) or -1 for excluded pixels.
     """
-    key = str(raw).strip().lower()
-    if key in PIXBOX_LABEL_MAP:
-        return PIXBOX_LABEL_MAP[key]
-    raise ValueError(
-        f"Unknown PixBox label '{raw}'. "
-        f"Expected one of: {list(PIXBOX_LABEL_MAP.keys())}"
-    )
+    return CLOUD_CHAR_MAP.get(int(value), -1)
 
 
 def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     """Load PixBox reference labels grouped by Sentinel-2 scene.
 
     Parses ``pixbox_sentinel2_cmix_20180425.csv`` from the downloaded
-    PixBox-S2-CMIX ZIP. Column names are matched via aliases to handle
-    minor schema variants across PixBox releases.
+    PixBox-S2-CMIX ZIP. The CloudSEN12 4-class label is derived by
+    combining two PixBox columns:
 
-    Expected CSV schema (from the PixBox description file)::
+    - **CLOUD_CHARACTERISTICS_ID** → Clear (0), Thick Cloud (1),
+      Thin Cloud (2), or excluded (-1).
+    - **SHADOW_ID == 3** (Cloud shadow) → overrides to Cloud Shadow (3).
 
-        product_id, row, col, class_id, [other columns...]
-
-    where ``class_id`` uses 1-based integer codes:
-        1=Clear, 2=Thick cloud, 3=Thin cloud, 4=Cloud shadow.
+    Pixels with label -1 (ambiguous categories like "spatially mixed"
+    or "cloud border") are kept in the DataFrame but will be excluded
+    during experiment filtering (they have y_true < 0).
 
     Args:
         pixbox_dir: Directory containing the extracted PixBox CSV file.
@@ -187,12 +196,7 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     Returns:
         Dictionary mapping scene/product_id -> DataFrame with columns:
             row, col, label (CloudSEN12 integer: 0=Clear, 1=Thick,
-            2=Thin, 3=Shadow).
-
-    Raises:
-        FileNotFoundError: If no CSV files are found.
-        KeyError: If expected columns are absent (available columns are
-            printed to assist debugging).
+            2=Thin, 3=Shadow, -1=excluded).
     """
     root = Path(pixbox_dir)
 
@@ -201,7 +205,6 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     if canonical.exists():
         csv_files = [canonical]
     else:
-        # The ZIP may extract into a subdirectory.
         csv_files = sorted(root.rglob(PIXBOX_CSV_FILENAME))
         if not csv_files:
             csv_files = sorted(root.rglob("*.csv"))
@@ -215,19 +218,12 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
     print(f"Found {len(csv_files)} CSV file(s) in '{root}'.")
 
     # Column aliases — ordered by priority (first match wins).
-    # Actual PixBox CSV schema:
-    #   PIXEL_X = column index, PIXEL_Y = row index, PRODUCT_ID = scene,
-    #   CLOUD_CHARACTERISTICS_ID = primary cloud/clear label for CMIX.
-    # CLOUD_TYPE_ID only contains cloud sub-type (thin/thick) and is 1 for
-    # all non-cloud pixels, so it must NOT be used as the primary label.
     _row_aliases = {"pixel_y", "row", "pixel_row", "line", "y_pixel", "y"}
     _col_aliases = {"pixel_x", "col", "column", "pixel_col", "sample", "x_pixel", "x"}
-    _label_aliases = {
+    _cloud_char_aliases = {
         "cloud_characteristics_id", "cloud_char_id",
-        "class_id", "class", "label", "cloud_class",
-        "reference", "ref_class", "cloud_mask",
-        "cloud_type_id", "cloud_type",
     }
+    _shadow_aliases = {"shadow_id"}
     _scene_aliases = {
         "product_id", "scene_id", "scene", "granule",
         "tile", "image", "s2_product",
@@ -253,15 +249,12 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
 
         row_col = _find_col(cols, _row_aliases, "row")
         col_col = _find_col(cols, _col_aliases, "col")
-        label_col = _find_col(cols, _label_aliases, "label")
+        cloud_char_col = _find_col(cols, _cloud_char_aliases, "CLOUD_CHARACTERISTICS_ID")
+        shadow_col = _find_col(cols, _shadow_aliases, "SHADOW_ID")
 
-        # Print unique values for all *_ID columns to help verify the mapping.
-        id_cols = [c for c in cols if c.upper().endswith("_ID")]
-        print("  Unique values per ID column (first 10 each):")
-        for c in id_cols:
-            uvals = sorted(df_raw[c].dropna().unique().tolist())[:10]
-            print(f"    {c}: {uvals}")
-        print(f"  -> Using '{label_col}' as class label.")
+        # Print unique values for key columns.
+        print(f"  {cloud_char_col} unique: {sorted(df_raw[cloud_char_col].unique().tolist())}")
+        print(f"  {shadow_col} unique: {sorted(df_raw[shadow_col].unique().tolist())}")
 
         try:
             scene_col = _find_col(cols, _scene_aliases, "scene_id")
@@ -269,10 +262,29 @@ def load_pixbox_labels(pixbox_dir: str) -> Dict[str, pd.DataFrame]:
         except KeyError:
             scene_ids = pd.Series([csv_path.stem] * len(df_raw))
 
+        # Derive CloudSEN12 labels from CLOUD_CHARACTERISTICS_ID + SHADOW_ID.
+        labels = df_raw[cloud_char_col].apply(_map_cloud_char)
+
+        # Override: SHADOW_ID == 3 (Cloud shadow) → CloudSEN12 class 3,
+        # but only for pixels that are Clear (not already cloud).
+        is_cloud_shadow = df_raw[shadow_col] == SHADOW_CLOUD_ID
+        is_clear = labels == 0
+        labels = labels.where(~(is_cloud_shadow & is_clear), other=3)
+        # Also set cloud shadow for pixels marked as "none of classes" / excluded
+        # that have SHADOW_ID == 3.
+        is_excluded = labels == -1
+        labels = labels.where(~(is_cloud_shadow & is_excluded), other=3)
+
+        n_excluded = (labels == -1).sum()
+        class_counts = labels.value_counts().sort_index()
+        print(f"  Label distribution (CloudSEN12): {class_counts.to_dict()}")
+        if n_excluded > 0:
+            print(f"  -> {n_excluded} pixels excluded (ambiguous categories).")
+
         df_raw["_scene"] = scene_ids
         df_raw["_row"] = df_raw[row_col].astype(int)
         df_raw["_col"] = df_raw[col_col].astype(int)
-        df_raw["_label"] = df_raw[label_col].apply(_parse_label)
+        df_raw["_label"] = labels.astype(int)
 
         for scene_id, group in df_raw.groupby("_scene"):
             entry = (

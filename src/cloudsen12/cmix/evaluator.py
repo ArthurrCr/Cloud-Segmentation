@@ -31,6 +31,7 @@ Typical usage
 
 import json
 import time
+import zipfile
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Union
 
@@ -115,6 +116,22 @@ class CmixEvaluator:
             str(self.pixbox_dir)
         )
 
+        # Build a scene index: map SAFE names to paths (dirs or zips).
+        self._scene_index: Dict[str, Path] = {}
+        self._build_scene_index()
+
+    def _build_scene_index(self) -> None:
+        """Scan scenes_dir recursively for .SAFE dirs and .SAFE.zip files."""
+        for p in self.scenes_dir.rglob("*.SAFE"):
+            if p.is_dir():
+                self._scene_index[p.name] = p
+        for p in self.scenes_dir.rglob("*.SAFE.zip"):
+            safe_name = p.name.replace(".zip", "")
+            if safe_name not in self._scene_index:
+                self._scene_index[safe_name] = p  # points to zip
+        print(f"  Scene index: {len(self._scene_index)} scenes found "
+              f"({sum(1 for v in self._scene_index.values() if v.suffix == '.zip')} zipped).")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -122,33 +139,46 @@ class CmixEvaluator:
     def _scene_dir(self, scene_id: str) -> Path:
         """Resolve the filesystem path for a given scene ID.
 
-        Searches for a subdirectory whose name contains the scene_id.
-        Falls back to a direct path match.
+        Uses the pre-built scene index. If the entry is a .zip file,
+        extracts it in place and updates the index.
+
+        Args:
+            scene_id: SAFE directory name, e.g.
+                'S2A_MSIL1C_20170113T072241_...SAFE'.
 
         Raises:
-            FileNotFoundError: If no matching directory is found.
+            FileNotFoundError: If no matching directory or ZIP is found.
         """
-        # Direct match.
-        direct = self.scenes_dir / scene_id
-        if direct.is_dir():
-            return direct
-
-        # Partial match (e.g., scene_id is a granule tile like 'T33UUP').
-        matches = [
-            p for p in self.scenes_dir.iterdir()
-            if p.is_dir() and scene_id in p.name
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            print(
-                f"  WARNING: multiple directories match scene_id '{scene_id}'. "
-                f"Using: {matches[0].name}"
+        path = self._scene_index.get(scene_id)
+        if path is None:
+            raise FileNotFoundError(
+                f"No directory or ZIP found for scene '{scene_id}' "
+                f"under '{self.scenes_dir}'."
             )
-            return matches[0]
+
+        # Already extracted.
+        if path.is_dir():
+            return path
+
+        # It's a .zip — extract it.
+        print(f"  Extracting {path.name}...")
+        with zipfile.ZipFile(path, "r") as zf:
+            zf.extractall(path.parent)
+
+        extracted = path.parent / scene_id
+        if extracted.is_dir():
+            self._scene_index[scene_id] = extracted
+            return extracted
+
+        # Fallback: look for any .SAFE dir that appeared.
+        for d in path.parent.iterdir():
+            if d.is_dir() and scene_id.replace(".SAFE", "") in d.name:
+                self._scene_index[scene_id] = d
+                return d
 
         raise FileNotFoundError(
-            f"No directory found for scene '{scene_id}' in '{self.scenes_dir}'."
+            f"Extraction of '{path.name}' did not produce expected "
+            f"directory '{scene_id}'."
         )
 
     def _cache_path(self, model_name: str, scene_id: str) -> Path:

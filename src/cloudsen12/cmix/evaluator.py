@@ -29,6 +29,7 @@ Typical usage
     print(table)
 """
 
+import gc
 import json
 import time
 import zipfile
@@ -275,7 +276,9 @@ class CmixEvaluator:
                 print(f"  Loading bands from: {scene_dir.name}")
                 t0 = time.time()
                 image, _ = load_scene_bands(str(scene_dir), target_resolution=10)
-                print(f"  Bands loaded in {time.time() - t0:.1f}s | shape: {image.shape}")
+                print(f"  Bands loaded in {time.time() - t0:.1f}s | shape: {image.shape} | "
+                      f"dtype: {image.dtype} | "
+                      f"{image.nbytes / 1024**3:.1f} GB")
 
                 # Run full-scene inference.
                 t0 = time.time()
@@ -288,11 +291,13 @@ class CmixEvaluator:
                     batch_size=self.inference_batch_size,
                     normalize_fn=normalize_fn,
                 )
+                del image  # Free ~3 GB immediately.
                 print(f"  Inference done in {time.time() - t0:.1f}s")
 
                 # Extract predictions at labeled coordinates.
                 y_true = pixels_df["label"].to_numpy(dtype=np.int64)
                 y_pred = extract_predictions_at_pixels(pred_mask, pixels_df)
+                del pred_mask  # Free ~0.5 GB.
 
                 self._save_scene_preds(model_name, scene_id, y_true, y_pred)
                 print(f"  Cached predictions for {len(y_true)} pixels.")
@@ -307,6 +312,10 @@ class CmixEvaluator:
                     continue
                 confusion = compute_binary_confusion(y_true_bin, y_pred_bin)
                 confusions[exp_name].append(confusion)
+
+            # Force garbage collection between scenes.
+            gc.collect()
+            torch.cuda.empty_cache()
 
         # Aggregate and compute global metrics.
         print(f"\n{'=' * 70}")

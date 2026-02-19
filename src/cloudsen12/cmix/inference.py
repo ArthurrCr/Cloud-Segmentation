@@ -84,7 +84,7 @@ def _find_band_file(scene_dir: Path, band_id: str) -> Path:
 def load_scene_bands(
     scene_dir: str,
     target_resolution: int = 10,
-    dtype: np.dtype = np.float32,
+    dtype: np.dtype = np.float16,
 ) -> Tuple[np.ndarray, dict]:
     """Load all 13 Sentinel-2 bands, resampling to a common resolution.
 
@@ -92,11 +92,12 @@ def load_scene_bands(
         scene_dir: Path to the Sentinel-2 scene directory (SAFE or flat).
         target_resolution: Spatial resolution in metres. All bands will be
             resampled to this resolution. Default is 10 m.
-        dtype: NumPy dtype for the output array.
+        dtype: NumPy dtype for the output array. Default is float16 to
+            reduce memory (~3.1 GB vs 6.3 GB for a full S2 scene).
 
     Returns:
         Tuple (image, meta):
-            image: Float32 array of shape (13, H, W) with raw DN values.
+            image: Array of shape (13, H, W) with raw DN values.
             meta: rasterio metadata dict from the first 10 m band.
     """
     root = Path(scene_dir)
@@ -201,22 +202,22 @@ def run_full_scene_inference(
 ) -> np.ndarray:
     """Run sliding-window inference on a full Sentinel-2 scene.
 
-    Logits from overlapping patches are accumulated in a float accumulation
-    buffer and averaged before the final argmax, which gives smoother
-    predictions at seam boundaries compared to majority voting.
+    Logits from overlapping patches are accumulated in a float16
+    accumulation buffer and averaged before the final argmax.
+
+    Memory-optimised for Colab / low-RAM environments:
+    - Accumulation buffers use float16 (~1 GB vs 1.9 GB for float32).
+    - Count map uses uint8 (max overlap ~16 with typical strides).
+    - Argmax is computed in row chunks to avoid a full-scene temp array.
 
     Args:
-        image: Float32 array (13, H, W) of raw DN values.
-        models: List of models in eval mode. Multiple models are ensembled
-            by averaging their softmax probabilities.
+        image: Array (13, H, W) of raw DN values (any float dtype).
+        models: List of models in eval mode.
         device: PyTorch device.
-        patch_size: Spatial size of each square patch fed to the model.
-        stride: Step size between adjacent patches. Use stride < patch_size
-            for overlapping patches (recommended: stride = patch_size // 2).
+        patch_size: Spatial size of each square patch.
+        stride: Step size between adjacent patches.
         batch_size: Number of patches per forward pass.
-        normalize_fn: Optional callable applied to each batch tensor before
-            the forward pass. Should accept and return a (B, 13, H, W) tensor.
-            Pass None to feed raw DN values to the model.
+        normalize_fn: Optional callable for batch normalisation.
         num_classes: Number of output classes.
 
     Returns:
@@ -225,9 +226,9 @@ def run_full_scene_inference(
     _, H, W = image.shape
     device = torch.device(device)
 
-    # Accumulation buffers.
-    logit_sum = np.zeros((num_classes, H, W), dtype=np.float32)
-    count_map = np.zeros((H, W), dtype=np.float32)
+    # Accumulation buffers — float16 + uint8 to save ~1.5 GB.
+    logit_sum = np.zeros((num_classes, H, W), dtype=np.float16)
+    count_map = np.zeros((H, W), dtype=np.uint8)
 
     patches = _compute_patch_grid(H, W, patch_size, stride)
     n_patches = len(patches)
@@ -247,15 +248,14 @@ def run_full_scene_inference(
             unit="batch",
         ):
             batch_coords = patches[batch_start: batch_start + batch_size]
-            batch_arrays: List[np.ndarray] = []
 
-            for r0, r1, c0, c1 in batch_coords:
-                patch = image[:, r0:r1, c0:c1].copy()  # (13, P, P)
-                batch_arrays.append(patch)
-
+            # Build batch tensor directly — avoids intermediate list.
             batch_tensor = torch.from_numpy(
-                np.stack(batch_arrays, axis=0)
-            ).float().to(device)  # (B, 13, P, P)
+                np.stack(
+                    [image[:, r0:r1, c0:c1] for r0, r1, c0, c1 in batch_coords],
+                    axis=0,
+                )
+            ).float().to(device)  # (B, 13, P, P) — always float32 on GPU
 
             if normalize_fn is not None:
                 batch_tensor = normalize_fn(batch_tensor)
@@ -264,20 +264,28 @@ def run_full_scene_inference(
             if len(models) > 1:
                 probs = torch.stack(
                     [torch.softmax(m(batch_tensor), dim=1) for m in models]
-                ).mean(dim=0)  # (B, C, P, P)
+                ).mean(dim=0)
             else:
                 probs = torch.softmax(models[0](batch_tensor), dim=1)
 
-            probs_np = probs.cpu().numpy()  # (B, C, P, P)
+            probs_np = probs.cpu().numpy().astype(np.float16)  # (B, C, P, P)
+
+            del batch_tensor, probs
+            torch.cuda.empty_cache()
 
             for i, (r0, r1, c0, c1) in enumerate(batch_coords):
                 logit_sum[:, r0:r1, c0:c1] += probs_np[i]
-                count_map[r0:r1, c0:c1] += 1.0
+                count_map[r0:r1, c0:c1] += 1
 
-            torch.cuda.empty_cache()
+    # Argmax in row chunks to avoid allocating a full (4, H, W) temp array.
+    pred_mask = np.empty((H, W), dtype=np.int32)
+    chunk_rows = 512  # process 512 rows at a time
+    for r0 in range(0, H, chunk_rows):
+        r1 = min(r0 + chunk_rows, H)
+        cm = count_map[r0:r1, :].astype(np.float16)
+        cm = np.maximum(cm, np.float16(1.0))
+        avg = logit_sum[:, r0:r1, :] / cm[np.newaxis, :, :]
+        pred_mask[r0:r1, :] = np.argmax(avg, axis=0)
 
-    # Average accumulated probabilities and take argmax.
-    count_map = np.maximum(count_map, 1.0)  # avoid division by zero
-    avg_probs = logit_sum / count_map[np.newaxis, :, :]
-    pred_mask = np.argmax(avg_probs, axis=0).astype(np.int32)
+    del logit_sum, count_map
     return pred_mask

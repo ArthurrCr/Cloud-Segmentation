@@ -17,8 +17,8 @@ CloudSEN12 class mapping
 
 CMIX experiment mapping
 -----------------------
-Experiment 1 (all clouds):  positive = {1, 2},  negative = {0, 3}
-Experiment 2 (thick only):  positive = {1},      negative = {0, 3},
+Experiment 1 (all types of clouds"):  positive = {1, 2},  negative = {0, 3}
+Experiment 2 (without thin clouds):  positive = {1},      negative = {0, 3},
                             pixels with label=2 are excluded entirely.
 """
 

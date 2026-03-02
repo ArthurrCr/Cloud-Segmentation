@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 # Canonical model order used across every figure.
 MODEL_ORDER: List[str] = [
     "Unet + regnetz d8",
+    "Unet + regnetz d8 (CE)",
     "CloudS2Mask ensemble",
     "CloudS2Mask Dice_1 (single)",
     "CloudS2Mask Dice_2 (single)",
@@ -17,6 +18,7 @@ MODEL_ORDER: List[str] = [
 # Pastel palette aligned with MODEL_ORDER.
 PASTEL_PALETTE: Dict[str, str] = {
     "Unet + regnetz d8": "#7CB9E8",
+    "Unet + regnetz d8 (CE)": "#A3D9A5",
     "CloudS2Mask ensemble": "#F4A87C",
     "CloudS2Mask Dice_1 (single)": "#F7D98E",
     "CloudS2Mask Dice_2 (single)": "#F5A0A0",
@@ -26,6 +28,7 @@ PASTEL_PALETTE: Dict[str, str] = {
 # Display labels.
 MODEL_LABELS: Dict[str, str] = {
     "Unet + regnetz d8": "Ours (UNet+RegNetZ-D8)",
+    "Unet + regnetz d8 (CE)": "Ours (UNet+RegNetZ-D8 (CE))",
     "CloudS2Mask ensemble": "CloudS2Mask (ensemble)",
     "CloudS2Mask Dice_1 (single)": "CloudS2Mask Dice\u2081",
     "CloudS2Mask Dice_2 (single)": "CloudS2Mask Dice\u2082",
@@ -35,6 +38,7 @@ MODEL_LABELS: Dict[str, str] = {
 # Marker shapes.
 MODEL_MARKERS: Dict[str, str] = {
     "Unet + regnetz d8": "o",
+    "Unet + regnetz d8 (CE)": "o",
     "CloudS2Mask ensemble": "s",
     "CloudS2Mask Dice_1 (single)": "^",
     "CloudS2Mask Dice_2 (single)": "v",

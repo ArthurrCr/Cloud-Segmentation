@@ -231,7 +231,7 @@ class ExperimentRunner:
 
         # Validation evaluation (for model selection)
         print("Evaluating on VALIDATION set (for model selection)...")
-        df_boa_val = evaluate_test_dataset(
+        df_boa_val, _ = evaluate_test_dataset(
             val_loader, model, device=self.device, normalize_imgs=False
         )
         val_metrics = self.extract_boa_metrics(df_boa_val, prefix="val_")
@@ -244,7 +244,7 @@ class ExperimentRunner:
 
         # Test evaluation (for reporting)
         print("Evaluating on TEST set (for final reporting)...")
-        df_boa_test = evaluate_test_dataset(
+        df_boa_test, _ = evaluate_test_dataset(
             test_loader, model, device=self.device, normalize_imgs=False
         )
         test_metrics = self.extract_boa_metrics(df_boa_test, prefix="test_")

@@ -34,7 +34,7 @@ import json
 import time
 import zipfile
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -80,6 +80,13 @@ class CmixEvaluator:
         patch_size: Patch size for sliding-window inference.
         stride: Stride for sliding-window inference.
         inference_batch_size: Number of patches per forward pass.
+        use_offset_grid: If True, uses the CloudS2Mask offset grid
+            strategy where alternate rows are shifted by half the patch
+            width (Wright et al. 2024, Fig. 4).
+        use_gradient_weight: If True, applies linear gradient weighting
+            at patch edges for smoother merging (Wright et al. 2024,
+            Fig. 6).
+        gradient_border: Width of the edge gradient ramp in pixels.
     """
 
     def __init__(
@@ -91,6 +98,9 @@ class CmixEvaluator:
         patch_size: int = 512,
         stride: int = 256,
         inference_batch_size: int = 8,
+        use_offset_grid: bool = False,
+        use_gradient_weight: bool = False,
+        gradient_border: int = 64,
     ) -> None:
         self.pixbox_dir = Path(pixbox_dir)
         self.scenes_dir = Path(scenes_dir)
@@ -101,6 +111,9 @@ class CmixEvaluator:
         self.patch_size = patch_size
         self.stride = stride
         self.inference_batch_size = inference_batch_size
+        self.use_offset_grid = use_offset_grid
+        self.use_gradient_weight = use_gradient_weight
+        self.gradient_border = gradient_border
 
         # {model_name: {experiment: {metric: value}}}
         self._results: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -111,6 +124,9 @@ class CmixEvaluator:
         print(f"  Scenes dir:      {self.scenes_dir}")
         print(f"  Output dir:      {self.output_dir}")
         print(f"  Patch / stride:  {self.patch_size} / {self.stride}")
+        print(f"  Offset grid:     {self.use_offset_grid}")
+        print(f"  Gradient weight: {self.use_gradient_weight}"
+              + (f" (border={self.gradient_border})" if self.use_gradient_weight else ""))
 
         print("\nLoading PixBox labels...")
         self._labels: Dict[str, pd.DataFrame] = load_pixbox_labels(
@@ -290,6 +306,9 @@ class CmixEvaluator:
                     stride=self.stride,
                     batch_size=self.inference_batch_size,
                     normalize_fn=normalize_fn,
+                    use_offset_grid=self.use_offset_grid,
+                    use_gradient_weight=self.use_gradient_weight,
+                    gradient_border=self.gradient_border,
                 )
                 del image  # Free ~3 GB immediately.
                 print(f"  Inference done in {time.time() - t0:.1f}s")

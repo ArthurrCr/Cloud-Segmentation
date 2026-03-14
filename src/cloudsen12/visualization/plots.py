@@ -977,12 +977,19 @@ def plot_qualitative_from_loader(
     predictions: Dict[str, List[np.ndarray]] = {m: [] for m in model_names}
 
     for m_name in model_names:
-        model_list, use_ens, norm = models_dict[m_name]
+        entry = models_dict[m_name]
+        model_list, use_ens, norm = entry[0], entry[1], entry[2]
+        pre_scale = entry[3] if len(entry) == 4 else 1.0
+
         for idx in indices:
             inp = collected[idx].unsqueeze(0).to(device).float()
+
             if norm:
                 inp = inp * dataset_scale
                 inp = normalize_images(inp, mean, std)
+            elif pre_scale != 1.0:
+                inp = inp / pre_scale
+
             with torch.no_grad():
                 pred = get_predictions(
                     model_list, inp, use_ensemble=use_ens,

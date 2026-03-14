@@ -13,6 +13,7 @@ MODEL_ORDER: List[str] = [
     "CloudS2Mask Dice_1 (single)",
     "CloudS2Mask Dice_2 (single)",
     "Unet + MobilenetV2",
+    "OmniCloudMask",
 ]
 
 # Pastel palette aligned with MODEL_ORDER.
@@ -23,6 +24,7 @@ PASTEL_PALETTE: Dict[str, str] = {
     "CloudS2Mask Dice_1 (single)": "#F7D98E",
     "CloudS2Mask Dice_2 (single)": "#F5A0A0",
     "Unet + MobilenetV2": "#B8B8D1",
+    "OmniCloudMask": "#D4A5C9",
 }
 
 # Display labels.
@@ -33,6 +35,7 @@ MODEL_LABELS: Dict[str, str] = {
     "CloudS2Mask Dice_1 (single)": "CloudS2Mask Dice\u2081",
     "CloudS2Mask Dice_2 (single)": "CloudS2Mask Dice\u2082",
     "Unet + MobilenetV2": "UNetMobV2 (baseline)",
+    "OmniCloudMask": "OmniCloudMask (zero-shot)",
 }
 
 # Marker shapes.
@@ -43,6 +46,7 @@ MODEL_MARKERS: Dict[str, str] = {
     "CloudS2Mask Dice_1 (single)": "^",
     "CloudS2Mask Dice_2 (single)": "v",
     "Unet + MobilenetV2": "D",
+    "OmniCloudMask": "P",
 }
 
 # Fallback colors for unknown models.

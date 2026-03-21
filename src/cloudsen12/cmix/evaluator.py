@@ -420,6 +420,81 @@ class CmixEvaluator:
 
         return pd.DataFrame(rows)
 
+    def recompute_metrics_from_cache(
+        self,
+        model_name: str,
+        experiments: Optional[List[str]] = None,
+    ) -> bool:
+        """Recompute metrics from cached .npz prediction files.
+
+        Useful when new experiments are added to CMIX_EXPERIMENTS after
+        inference has already been run. Reads the per-scene .npz files,
+        applies the experiment filters, and updates (merges) the results
+        dict and JSON cache — without re-running any inference.
+
+        Args:
+            model_name: Model whose cached .npz files should be used.
+            experiments: List of experiment keys to (re)compute. Defaults
+                to all keys in CMIX_EXPERIMENTS.
+
+        Returns:
+            True if at least one .npz file was found and processed.
+        """
+        target_exps = experiments or list(CMIX_EXPERIMENTS.keys())
+
+        # Collect all cached .npz files for this model.
+        safe_model = model_name.replace("/", "-").replace(" ", "_")
+        npz_files = sorted(self.output_dir.glob(f"{safe_model}_*_preds.npz"))
+
+        if not npz_files:
+            print(f"No cached .npz files found for '{model_name}'. "
+                  f"Run inference first.")
+            return False
+
+        print(f"\nRecomputing {len(target_exps)} experiment(s) for "
+              f"'{model_name}' from {len(npz_files)} cached scene(s).")
+
+        confusions: Dict[str, List[BinaryConfusion]] = {
+            exp: [] for exp in target_exps
+        }
+
+        for npz_path in npz_files:
+            data = np.load(npz_path)
+            y_true = data["y_true"]
+            y_pred = data["y_pred"]
+
+            for exp_name in target_exps:
+                y_true_bin, y_pred_bin, valid = apply_experiment_filter(
+                    y_true, y_pred, exp_name
+                )
+                if valid.sum() == 0:
+                    continue
+                confusions[exp_name].append(
+                    compute_binary_confusion(y_true_bin, y_pred_bin)
+                )
+
+        # Compute global metrics and merge into existing results.
+        existing = self._results.get(model_name, {})
+        for exp_name, exp_confusions in confusions.items():
+            if not exp_confusions:
+                print(f"  No data for experiment '{exp_name}'.")
+                existing[exp_name] = {k: float("nan")
+                                      for k in ("OA", "BOA", "PA", "UA")}
+                continue
+            global_conf = accumulate_global_confusion(exp_confusions)
+            metrics = compute_cmix_metrics(global_conf)
+            existing[exp_name] = metrics
+            print(f"  {exp_name}: BOA={metrics['BOA']:.4f}  "
+                  f"PA={metrics['PA']:.4f}  UA={metrics['UA']:.4f}")
+
+        self._results[model_name] = existing
+
+        # Persist updated results to JSON.
+        with open(self._results_path(model_name), "w") as f:
+            json.dump(existing, f, indent=2)
+        print(f"Updated cache: {self._results_path(model_name)}")
+        return True
+
     def load_results_from_disk(self, model_name: str) -> bool:
         """Load previously saved results from JSON cache.
 

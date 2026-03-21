@@ -95,6 +95,30 @@ CMIX_EXPERIMENTS: Dict[str, Dict] = {
         "neg": {0, 3},
         "exclude": {2},
     },
+    # ------------------------------------------------------------------
+    # OmniCloudMask protocol (Wright et al. 2025, Table A.1)
+    # Each class is evaluated independently as a binary problem:
+    #   positive = target class, negative = all other classes.
+    # This allows direct comparison with OmniCloudMask BOA values.
+    # ------------------------------------------------------------------
+    "omni_clear": {
+        "description": "Clear vs. Thick Cloud + Thin Cloud + Shadow (OmniCloudMask protocol)",
+        "pos": {0},
+        "neg": {1, 2, 3},
+        "exclude": set(),
+    },
+    "omni_cloud": {
+        "description": "Thick + Thin cloud vs. Clear + Shadow (OmniCloudMask protocol)",
+        "pos": {1, 2},
+        "neg": {0, 3},
+        "exclude": set(),
+    },
+    "omni_shadow": {
+        "description": "Shadow vs. Clear + Thick Cloud + Thin Cloud (OmniCloudMask protocol)",
+        "pos": {3},
+        "neg": {0, 1, 2},
+        "exclude": set(),
+    },
 }
 
 # Hard-coded PRODUCT_ID -> SAFE name mapping from the PixBox description file.

@@ -29,13 +29,13 @@ PASTEL_PALETTE: Dict[str, str] = {
 
 # Display labels.
 MODEL_LABELS: Dict[str, str] = {
-    "Unet + regnetz d8": "Ours (UNet+RegNetZ-D8)",
-    "Unet + regnetz d8 (CE)": "Ours (UNet+RegNetZ-D8 (CE))",
+    "Unet + regnetz d8": "UNet+RegNetZ-D8 (FT)",
+    "Unet + regnetz d8 (CE)": "UNet+RegNetZ-D8 (CE)",
     "CloudS2Mask ensemble": "CloudS2Mask (ensemble)",
     "CloudS2Mask Dice_1 (single)": "CloudS2Mask Dice\u2081",
     "CloudS2Mask Dice_2 (single)": "CloudS2Mask Dice\u2082",
-    "Unet + MobilenetV2": "UNetMobV2 (baseline)",
-    "OmniCloudMask": "OmniCloudMask (zero-shot)",
+    "Unet + MobilenetV2": "UNetMobV2",
+    "OmniCloudMask": "OmniCloudMask (ensemble)",
 }
 
 # Marker shapes.

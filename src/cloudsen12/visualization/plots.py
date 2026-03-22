@@ -273,7 +273,7 @@ def plot_stratified_boa(
     ax.set_xlabel(stratify_label, fontsize=12)
     ax.set_ylabel("Median BOA", fontsize=12)
     ax.set_title(f"BOA by {stratify_label} -- {experiment}", fontsize=13)
-    ax.legend(fontsize=9, loc="lower left")
+    ax.legend(fontsize=9, loc="upper left", bbox_to_anchor=(1.01, 1), borderaxespad=0)
     ax.grid(axis="y", alpha=0.3)
     ax.set_ylim(bottom=0.5)
     clean_spines(ax)

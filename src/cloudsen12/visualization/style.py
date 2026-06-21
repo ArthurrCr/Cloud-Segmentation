@@ -1,5 +1,6 @@
 """Shared styling constants and helpers for all visualizations."""
 
+import os
 from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
@@ -78,12 +79,36 @@ def clean_spines(ax: plt.Axes) -> None:
     ax.tick_params(left=False)
 
 
+def _save_figure(
+    fig: plt.Figure,
+    save_path: str,
+    formats: tuple = ("png", "svg"),
+    dpi: int = 300,
+) -> None:
+    """Save a figure in multiple formats, reusing save_path's stem.
+
+    Any extension already present in ``save_path`` is ignored/replaced;
+    one file is written per entry in ``formats`` (e.g. ``save_path="fig"``
+    or ``save_path="fig.png"`` both produce ``fig.png`` and ``fig.svg``).
+    PNG (and other raster formats) are written at ``dpi``; vector formats
+    such as SVG ignore dpi entirely.
+    """
+    stem, _ = os.path.splitext(save_path)
+    for fmt in formats:
+        kwargs = {"bbox_inches": "tight"}
+        if fmt.lower() in ("png", "jpg", "jpeg", "tif", "tiff"):
+            kwargs["dpi"] = dpi
+        fig.savefig(f"{stem}.{fmt}", **kwargs)
+
+
 def save_and_show(
     fig: plt.Figure,
     save_path: Optional[str] = None,
+    formats: tuple = ("png", "svg"),
+    dpi: int = 300,
 ) -> None:
-    """Tight-layout, optionally save, and display a figure."""
+    """Tight-layout, optionally save (in multiple formats), and display a figure."""
     fig.tight_layout()
     if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        _save_figure(fig, save_path, formats=formats, dpi=dpi)
     plt.show()

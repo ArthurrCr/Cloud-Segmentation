@@ -17,6 +17,7 @@ from matplotlib.patches import Patch
 
 from cloudsen12.config.constants import CLASS_NAMES
 from cloudsen12.visualization.style import (
+    _save_figure,
     clean_spines,
     get_style,
     save_and_show,
@@ -891,7 +892,7 @@ def plot_qualitative_examples(
     fig.tight_layout(rect=[0, 0.04, 1, 1])
 
     if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        _save_figure(fig, save_path)
     plt.show()
 
 

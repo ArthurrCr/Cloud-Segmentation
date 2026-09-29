@@ -1,6 +1,6 @@
 """Patch-level Balanced Overall Accuracy (BOA) evaluation."""
 
-from typing import Dict, List, Tuple, Union
+from typing import Dict, Iterable, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -29,7 +29,9 @@ def compute_bucket_percentages(arr: np.ndarray) -> Tuple[float, float, float]:
     """
     arr = arr[~np.isnan(arr)]
     if arr.size == 0:
-        return (0.0, 0.0, 0.0)
+        return (np.nan, np.nan, np.nan)
+    # Bins are [0, 0.1), [0.1, 0.9), [0.9, 1.01]: a value of exactly 0.9 falls
+    # in the HIGH bucket. Only matters for values equal to 0.9 to the last bit.
     hist, _ = np.histogram(arr, [0, 0.1, 0.9, 1.01])
     return tuple(hist / arr.size * 100)
 
@@ -49,7 +51,16 @@ def _prepare_models(
 def _compute_binary_stats(
     tp: int, fn: int, fp: int, tn: int, skip_cloud_check: bool = False
 ) -> Dict[str, float]:
-    """Compute PA, UA, BOA, OE, CE from binary confusion counts."""
+    """Compute PA, UA, BOA, OE, CE from binary confusion counts.
+
+    PA is NaN when the class is absent from the reference (tp + fn == 0) and UA
+    is NaN when nothing was predicted as the class (tp + fp == 0). BOA is NaN
+    when either the class or its complement is absent from the reference.
+
+    skip_cloud_check additionally sets UA to NaN when the class is absent from
+    the reference. Without it, UA is 0 in that case whenever the model predicts
+    the class anywhere (tp = 0, fp > 0), which counts toward "UA low%".
+    """
     pa = safe_divide(tp, tp + fn)
     ua = safe_divide(tp, tp + fp)
 
@@ -71,6 +82,7 @@ def _build_summary_table(exps: Dict[str, Dict]) -> pd.DataFrame:
         pa_low, pa_mid, pa_high = compute_bucket_percentages(np.array(cfg["PA"]))
         ua_low, ua_mid, ua_high = compute_bucket_percentages(np.array(cfg["UA"]))
 
+        boa = np.asarray(cfg["BOA"], dtype=float)
         rows.append({
             "Experiment": name,
             "Median BOA": f"{np.nanmedian(cfg['BOA']):.4f}",
@@ -80,7 +92,10 @@ def _build_summary_table(exps: Dict[str, Dict]) -> pd.DataFrame:
             "UA low%": f"{ua_low:.2f}",
             "UA middle%": f"{ua_mid:.2f}",
             "UA high%": f"{ua_high:.2f}",
-            "N patches": len(cfg["BOA"]),
+            # Patches with a defined BOA: the ones the median is computed over.
+            "N patches": int(np.sum(~np.isnan(boa))),
+            # Every patch that was evaluated, defined or not.
+            "N total": len(boa),
         })
 
     return pd.DataFrame(rows)
@@ -113,6 +128,7 @@ def evaluate_test_dataset(
     device: str = "cuda",
     use_ensemble: bool = True,
     normalize_imgs: bool = True,
+    ua_nan_when_class_absent: Iterable[str] = ("cloud/no cloud",),
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Compute patch-level BOA using argmax predictions.
 
@@ -126,12 +142,22 @@ def evaluate_test_dataset(
         device: Device for execution.
         use_ensemble: If True, uses ensemble prediction.
         normalize_imgs: If True, normalizes images before inference.
+        ua_nan_when_class_absent: Experiments whose UA is set to NaN (dropped
+            from UA low/middle/high%) for a patch where the class is absent
+            from the reference. The default reproduces the original behaviour,
+            which applies this to "cloud/no cloud" only; pass () to treat all
+            three experiments the same way.
 
     Returns:
         Tuple of (summary_df, patch_df):
             summary_df: Median BOA and PA/UA bucket percentages.
             patch_df: Per-patch BOA, PA, UA for each experiment.
     """
+    ua_nan_when_class_absent = frozenset(ua_nan_when_class_absent)
+    unknown = ua_nan_when_class_absent - set(EXPERIMENTS)
+    if unknown:
+        raise ValueError(f"unknown experiments {sorted(unknown)}; expected {list(EXPERIMENTS)}")
+
     mean, std = get_normalization_stats(device, False, SENTINEL_BANDS)
     models = _prepare_models(models, device)
 
@@ -164,7 +190,7 @@ def evaluate_test_dataset(
 
                     stats = _compute_binary_stats(
                         tp, fn, fp, tn,
-                        skip_cloud_check=(name == "cloud/no cloud"),
+                        skip_cloud_check=(name in ua_nan_when_class_absent),
                     )
                     for key in ("PA", "UA", "BOA", "OE", "CE"):
                         cfg[key].append(stats[key])

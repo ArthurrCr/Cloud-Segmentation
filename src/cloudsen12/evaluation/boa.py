@@ -1,6 +1,6 @@
 """Patch-level Balanced Overall Accuracy (BOA) evaluation."""
 
-from typing import Dict, Iterable, List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -13,25 +13,44 @@ from cloudsen12.inference.normalization import get_normalization_stats, normaliz
 from cloudsen12.inference.prediction import get_predictions
 
 
+CONVENTIONS = ("original", "cloudsen12")
+
+# Positive class of "valid/invalid" under the CloudSEN12 convention. The paper
+# counts thin-cloud/shadow confusions as true positives there, so the positive
+# class is INVALID (thick cloud, thin cloud, shadow), not valid (clear).
+CLOUDSEN12_POSITIVES: Dict[str, List[int]] = {"valid/invalid": [1, 2, 3]}
+
+
 def safe_divide(numerator: float, denominator: float) -> float:
     """Return NaN when denominator is zero, otherwise numerator/denominator."""
     return np.nan if denominator == 0 else numerator / denominator
 
 
-def compute_bucket_percentages(arr: np.ndarray) -> Tuple[float, float, float]:
+def compute_bucket_percentages(
+    arr: np.ndarray, inclusive_middle: bool = False
+) -> Tuple[float, float, float]:
     """Compute percentage of values in ranges <0.1, 0.1-0.9, >0.9.
 
     Args:
         arr: Array of values (NaN values are ignored).
+        inclusive_middle: If False (original behaviour) the bins are
+            [0, 0.1), [0.1, 0.9), [0.9, 1.01], so a value of exactly 0.9 counts
+            as high. If True the middle bucket is [0.1, 0.9] and only values
+            above 0.9 are high, which is what the CloudSEN12 paper describes
+            and what reproduces its Table 6.
 
     Returns:
-        Tuple of (low_pct, mid_pct, high_pct) as percentages.
+        Tuple of (low_pct, mid_pct, high_pct) as percentages, all NaN when
+        there is no defined value.
     """
     arr = arr[~np.isnan(arr)]
     if arr.size == 0:
         return (np.nan, np.nan, np.nan)
-    # Bins are [0, 0.1), [0.1, 0.9), [0.9, 1.01]: a value of exactly 0.9 falls
-    # in the HIGH bucket. Only matters for values equal to 0.9 to the last bit.
+    if inclusive_middle:
+        low = np.count_nonzero(arr < 0.1)
+        mid = np.count_nonzero((arr >= 0.1) & (arr <= 0.9))
+        high = np.count_nonzero(arr > 0.9)
+        return (low / arr.size * 100, mid / arr.size * 100, high / arr.size * 100)
     hist, _ = np.histogram(arr, [0, 0.1, 0.9, 1.01])
     return tuple(hist / arr.size * 100)
 
@@ -49,23 +68,20 @@ def _prepare_models(
 
 
 def _compute_binary_stats(
-    tp: int, fn: int, fp: int, tn: int, skip_cloud_check: bool = False
+    tp: int, fn: int, fp: int, tn: int, mask_ua: bool = False
 ) -> Dict[str, float]:
     """Compute PA, UA, BOA, OE, CE from binary confusion counts.
 
     PA is NaN when the class is absent from the reference (tp + fn == 0) and UA
     is NaN when nothing was predicted as the class (tp + fp == 0). BOA is NaN
     when either the class or its complement is absent from the reference.
-
-    skip_cloud_check additionally sets UA to NaN when the class is absent from
-    the reference. Without it, UA is 0 in that case whenever the model predicts
-    the class anywhere (tp = 0, fp > 0), which counts toward "UA low%".
+    mask_ua forces UA to NaN; without it, UA is 0 whenever the model predicts
+    the class in a patch that does not contain it (tp = 0, fp > 0).
     """
     pa = safe_divide(tp, tp + fn)
     ua = safe_divide(tp, tp + fp)
 
-    if skip_cloud_check and (tp + fn) == 0:
-        pa = np.nan
+    if mask_ua:
         ua = np.nan
 
     boa = 0.5 * (safe_divide(tp, tp + fn) + safe_divide(tn, tn + fp))
@@ -75,12 +91,16 @@ def _compute_binary_stats(
     return {"PA": pa, "UA": ua, "BOA": boa, "OE": oe, "CE": ce}
 
 
-def _build_summary_table(exps: Dict[str, Dict]) -> pd.DataFrame:
+def _build_summary_table(
+    exps: Dict[str, Dict], inclusive_middle: bool = False
+) -> pd.DataFrame:
     """Build summary DataFrame from accumulated experiment metrics."""
     rows = []
     for name, cfg in exps.items():
-        pa_low, pa_mid, pa_high = compute_bucket_percentages(np.array(cfg["PA"]))
-        ua_low, ua_mid, ua_high = compute_bucket_percentages(np.array(cfg["UA"]))
+        pa = np.asarray(cfg["PA"], dtype=float)
+        ua = np.asarray(cfg["UA"], dtype=float)
+        pa_low, pa_mid, pa_high = compute_bucket_percentages(pa, inclusive_middle)
+        ua_low, ua_mid, ua_high = compute_bucket_percentages(ua, inclusive_middle)
 
         boa = np.asarray(cfg["BOA"], dtype=float)
         rows.append({
@@ -96,6 +116,9 @@ def _build_summary_table(exps: Dict[str, Dict]) -> pd.DataFrame:
             "N patches": int(np.sum(~np.isnan(boa))),
             # Every patch that was evaluated, defined or not.
             "N total": len(boa),
+            # Denominators of the PA and UA percentages.
+            "N PA": int(np.sum(~np.isnan(pa))),
+            "N UA": int(np.sum(~np.isnan(ua))),
         })
 
     return pd.DataFrame(rows)
@@ -128,7 +151,7 @@ def evaluate_test_dataset(
     device: str = "cuda",
     use_ensemble: bool = True,
     normalize_imgs: bool = True,
-    ua_nan_when_class_absent: Iterable[str] = ("cloud/no cloud",),
+    convention: str = "original",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Compute patch-level BOA using argmax predictions.
 
@@ -142,21 +165,24 @@ def evaluate_test_dataset(
         device: Device for execution.
         use_ensemble: If True, uses ensemble prediction.
         normalize_imgs: If True, normalizes images before inference.
-        ua_nan_when_class_absent: Experiments whose UA is set to NaN (dropped
-            from UA low/middle/high%) for a patch where the class is absent
-            from the reference. The default reproduces the original behaviour,
-            which applies this to "cloud/no cloud" only; pass () to treat all
-            three experiments the same way.
+        convention: "original" reproduces the numbers this code first produced:
+            UA is NaN only for "cloud/no cloud" in patches with no cloud,
+            "valid/invalid" takes clear as the positive class, and a
+            value of exactly 0.9 counts as high. "cloudsen12" follows
+            Aybar et al. (2022), Table 6: UA is NaN in every experiment for
+            patches with no thick or thin cloud in the reference, "valid/invalid"
+            takes invalid (cloud or shadow) as the positive class, and the
+            middle bucket includes 0.9. Median BOA is the same under both,
+            because BOA is symmetric in the two classes.
 
     Returns:
         Tuple of (summary_df, patch_df):
             summary_df: Median BOA and PA/UA bucket percentages.
             patch_df: Per-patch BOA, PA, UA for each experiment.
     """
-    ua_nan_when_class_absent = frozenset(ua_nan_when_class_absent)
-    unknown = ua_nan_when_class_absent - set(EXPERIMENTS)
-    if unknown:
-        raise ValueError(f"unknown experiments {sorted(unknown)}; expected {list(EXPERIMENTS)}")
+    if convention not in CONVENTIONS:
+        raise ValueError(f"unknown convention {convention!r}; expected {CONVENTIONS}")
+    paper = convention == "cloudsen12"
 
     mean, std = get_normalization_stats(device, False, SENTINEL_BANDS)
     models = _prepare_models(models, device)
@@ -178,9 +204,10 @@ def evaluate_test_dataset(
 
             for gt, pr in zip(gts.cpu().numpy(), preds.cpu().numpy()):
                 cm = confusion_matrix(gt.ravel(), pr.ravel(), labels=[0, 1, 2, 3])
+                no_cloud = cm[[1, 2], :].sum() == 0
 
                 for name, cfg in exps.items():
-                    pos = cfg["pos"]
+                    pos = CLOUDSEN12_POSITIVES.get(name, cfg["pos"]) if paper else cfg["pos"]
                     neg = [c for c in range(4) if c not in pos]
 
                     tp = cm[np.ix_(pos, pos)].sum()
@@ -188,14 +215,12 @@ def evaluate_test_dataset(
                     fp = cm[np.ix_(neg, pos)].sum()
                     tn = cm[np.ix_(neg, neg)].sum()
 
-                    stats = _compute_binary_stats(
-                        tp, fn, fp, tn,
-                        skip_cloud_check=(name in ua_nan_when_class_absent),
-                    )
+                    mask_ua = no_cloud and (paper or name == "cloud/no cloud")
+                    stats = _compute_binary_stats(tp, fn, fp, tn, mask_ua=mask_ua)
                     for key in ("PA", "UA", "BOA", "OE", "CE"):
                         cfg[key].append(stats[key])
 
-    summary_df = _build_summary_table(exps)
+    summary_df = _build_summary_table(exps, inclusive_middle=paper)
     patch_df = _build_patch_dataframe(exps)
     return summary_df, patch_df
 
